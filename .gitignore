@@ -1,0 +1,15 @@
+# Python
+backend/.venv/
+backend/data/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Frontend / Tauri
+frontend/node_modules/
+frontend/dist/
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+
+# Env
+.env
