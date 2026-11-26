@@ -1,5 +1,27 @@
 # Progress Log - MarkItDown Desktop
 
+## 2026-11-26 · v2.0 全面重构：Tailwind + shadcn/ui 苹果原生精修版与多模式工作台
+- **界面技术栈升级**（`frontend/`）：
+  - 全面迁移至 **Tailwind CSS v4 + `@tailwindcss/typography` + shadcn/ui (Radix UI 原语) + Zustand + Sonner + cmdk + CodeMirror 6 + rehype-highlight**。
+  - 修复核心 Bug：
+    1. 使用确定性 Rehype AST 插件 `rehypeStableHeadingIds` 生成标题锚点，彻底修复父组件重渲染导致的 TOC 目录跳转失效问题。
+    2. `SettingsModal` 改为本地草稿态（Draft State）+ 显式「保存并应用」+「测试连接（带延迟毫秒与鉴权校验）」，彻底解决输入地址时每敲一个字就发请求的 Bug。
+    3. 后端 `TaskManager` 启动时自动恢复中断的 `queued/processing` 任务，并加固扩展名白名单、流式分块上传大小限制与常量时间 Token 校验（`hmac.compare_digest`）。
+    4. `tauri.conf.json` 设置 `dragDropEnabled: false`，确保桌面端 WebView 拖拽上传正常工作。
+- **信息架构与视觉精修**：
+  - **转换中心（ConvertHub）**：提供三引擎可视化卡片（智能双引擎路由 / MarkItDown 极速 / Docling 深度 OCR）、文件批量拖拽上传、**系统剪贴板/HTML富文本/CSV/JSON 片段直接转 Markdown**、以及**一键载入学术论文+公式+表格示例**。
+  - **三模式工作区（阅读 / 编辑 / 校对）**：
+    - **阅读模式**：去除卡片套卡片，采用精修版 Apple 阅读排版，代码块带语言标签与一键复制，支持无衬线/衬线字体、字号（14–18px）、版面宽度（紧凑/标准/宽屏）实时调节。
+    - **编辑模式**：集成 **CodeMirror 6** 编辑器（行号、语法高亮、代码折叠、格式化工具栏），支持 **双栏同步 / 纯源码 / 修订对比（Diff 逐行对比初始转换结果）** 三种编辑子视图及防抖自动保存。
+    - **校对模式**：左侧原文件预览（支持 PDF、图片缩放与旋转、HTML/CSV表格/文本预览及原件下载），右侧可随时在「渲染预览」与「源码微调」之间切换。
+  - **右侧检查器（InspectorPanel）**：聚合「章节目录（带筛选与滚动高亮）」、「文档属性统计（词数/阅读时长/标题/表格/代码/公式计数、换引擎重转）」与「排版与 Markdown 智能清洗工具箱（一键智能精修、修复 PDF 跨行断句、压缩空行、规范标题、中英间距优化、GFM 表格列宽对齐）」。
+  - **多格式导出与复制**：合并至顶栏「导出 ▾」菜单，支持导出 `.md`、独立样式 `.html`、`.txt`、打印/导出 `.pdf`、打包 `.zip`，以及复制 Markdown 源码、**复制为富文本（可直接粘贴到飞书/Notion/Word）**。
+  - **双部署模式与 iOS 端适配**：设置支持「本机服务 (127.0.0.1:8000)」与「远程服务器 (VPS/局域网)」一键切换与常用节点保存；iOS/移动端配备底部四栏毛玻璃导航（转换中心/文档库/阅读器/设置）与底部抽屉式检查器。
+- **验证状态**：
+  - `backend/.venv/Scripts/python.exe -m pytest -v`：**8/8 通过**（含扩展名拦截、任务重命名与星标置顶、HTML 片段转换与批量删除、服务重启中断任务自动恢复、Word/Excel/PDF 双引擎端到端转换）。
+  - `frontend`：`npm run build`（`tsc && vite build`）**零错误通过**。
+  - **UI 实机预览验证**：已启动前后端服务并在浏览器预览完成「转换中心首页」、「三栏阅读与检查器模式」、「CodeMirror 6 双栏同步编辑模式」全流程交互与截图核验。
+
 ## 2026-11-26 · 清理 Docling 图片占位符（纯文本模式）
 - `backend/app/converter.py`：`export_to_markdown(image_placeholder="")` 并压缩多余空行。
 - `frontend/src/components/MarkdownPreview.tsx`：预览渲染自动过滤历史文档中残留的 `<!-- image -->`。

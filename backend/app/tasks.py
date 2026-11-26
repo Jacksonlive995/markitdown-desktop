@@ -26,12 +26,40 @@ class TaskManager:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._recover_interrupted_tasks()
+
+    def _recover_interrupted_tasks(self) -> None:
+        """Re-queue tasks left in queued/processing state by a previous server process."""
+        for task_dir in self.tasks_dir.iterdir():
+            if not task_dir.is_dir():
+                continue
+            task_id = task_dir.name
+            try:
+                meta = self._read_meta(task_id)
+            except (OSError, ValueError):
+                continue
+            if not meta or meta.get("status") not in ("queued", "processing"):
+                continue
+            source_path = self._find_source_path(task_id)
+            if source_path is None:
+                meta["status"] = "failed"
+                meta["error"] = "Source file missing after server restart"
+                meta["finished_at"] = _now_iso()
+                self._write_meta(task_id, meta)
+                continue
+            meta["status"] = "queued"
+            self._write_meta(task_id, meta)
+            engine: EngineChoice = meta.get("engine_requested", "auto")
+            self._executor.submit(self._run_task, task_id, source_path, engine)
 
     def _meta_path(self, task_id: str) -> Path:
         return self.tasks_dir / task_id / "meta.json"
 
     def _result_path(self, task_id: str) -> Path:
         return self.tasks_dir / task_id / "result.md"
+
+    def _original_result_path(self, task_id: str) -> Path:
+        return self.tasks_dir / task_id / "original.md"
 
     def _find_source_path(self, task_id: str) -> Path | None:
         task_dir = self.tasks_dir / task_id
@@ -75,6 +103,8 @@ class TaskManager:
             "duration_ms": None,
             "error": None,
             "markdown_length": 0,
+            "pinned": False,
+            "edited": False,
         }
         with self._lock:
             self._write_meta(task_id, meta)
@@ -106,10 +136,14 @@ class TaskManager:
             if meta is None or meta.get("status") != "completed":
                 return None
             self._result_path(task_id).write_text(markdown, encoding="utf-8")
+            orig_path = self._original_result_path(task_id)
+            orig_md = orig_path.read_text(encoding="utf-8") if orig_path.exists() else markdown
             meta["markdown_length"] = len(markdown)
+            meta["edited"] = markdown != orig_md
             self._write_meta(task_id, meta)
             data = dict(meta)
             data["markdown"] = markdown
+            data["original_markdown"] = orig_md
             return data
 
     def _run_task(self, task_id: str, source_path: Path, engine: EngineChoice) -> None:
@@ -125,6 +159,7 @@ class TaskManager:
             markdown, used_engine = convert_file(source_path, engine)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             self._result_path(task_id).write_text(markdown, encoding="utf-8")
+            self._original_result_path(task_id).write_text(markdown, encoding="utf-8")
             with self._lock:
                 meta = self._read_meta(task_id)
                 if meta is None:
@@ -134,6 +169,7 @@ class TaskManager:
                 meta["finished_at"] = _now_iso()
                 meta["duration_ms"] = elapsed_ms
                 meta["markdown_length"] = len(markdown)
+                meta["edited"] = False
                 self._write_meta(task_id, meta)
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -148,25 +184,33 @@ class TaskManager:
                 self._write_meta(task_id, meta)
 
     def get_task(self, task_id: str, include_markdown: bool = True) -> dict[str, Any] | None:
-        meta = self._read_meta(task_id)
+        with self._lock:
+            meta = self._read_meta(task_id)
         if meta is None:
             return None
         data = dict(meta)
         if include_markdown and meta.get("status") == "completed":
             result_path = self._result_path(task_id)
-            data["markdown"] = result_path.read_text(encoding="utf-8") if result_path.exists() else ""
+            orig_path = self._original_result_path(task_id)
+            md = result_path.read_text(encoding="utf-8") if result_path.exists() else ""
+            data["markdown"] = md
+            data["original_markdown"] = orig_path.read_text(encoding="utf-8") if orig_path.exists() else md
         return data
 
     def list_tasks(self, limit: int = 100) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         if not self.tasks_dir.exists():
             return items
-        for task_dir in self.tasks_dir.iterdir():
-            if not task_dir.is_dir():
-                continue
-            meta = self._read_meta(task_dir.name)
-            if meta:
-                items.append(meta)
+        with self._lock:
+            for task_dir in self.tasks_dir.iterdir():
+                if not task_dir.is_dir():
+                    continue
+                try:
+                    meta = self._read_meta(task_dir.name)
+                except (OSError, ValueError):
+                    continue
+                if meta:
+                    items.append(meta)
         items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         return items[:limit]
 
@@ -218,9 +262,30 @@ class TaskManager:
             return None
         return buf.getvalue()
 
+    def rename_task(self, task_id: str, filename: str) -> dict[str, Any] | None:
+        return self.update_task_meta(task_id, filename=filename)
+
+    def update_task_meta(
+        self,
+        task_id: str,
+        filename: str | None = None,
+        pinned: bool | None = None,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            meta = self._read_meta(task_id)
+            if meta is None:
+                return None
+            if filename is not None:
+                meta["filename"] = filename
+            if pinned is not None:
+                meta["pinned"] = pinned
+            self._write_meta(task_id, meta)
+            return dict(meta)
+
     def delete_task(self, task_id: str) -> bool:
         task_dir = self.tasks_dir / task_id
         if not task_dir.exists():
             return False
-        shutil.rmtree(task_dir, ignore_errors=True)
+        with self._lock:
+            shutil.rmtree(task_dir, ignore_errors=True)
         return True

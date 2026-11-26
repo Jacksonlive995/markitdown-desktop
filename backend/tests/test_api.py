@@ -55,6 +55,91 @@ def _make_pdf_bytes() -> bytes:
     return buf.getvalue()
 
 
+def test_rejects_unsupported_extension() -> None:
+    resp = client.post(
+        "/api/convert",
+        files={"file": ("malware.exe", b"MZ\x00\x00", "application/octet-stream")},
+        data={"engine": "auto"},
+    )
+    assert resp.status_code == 415
+
+
+def test_rename_task() -> None:
+    resp = client.post(
+        "/api/convert",
+        files={"file": ("budget.xlsx", _make_xlsx_bytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        data={"engine": "markitdown"},
+    )
+    task_id = resp.json()["task_id"]
+    _wait_task(task_id)
+    renamed = client.patch(f"/api/tasks/{task_id}", json={"filename": "季度预算.xlsx", "pinned": True})
+    assert renamed.status_code == 200
+    assert renamed.json()["filename"] == "季度预算.xlsx"
+    assert renamed.json()["pinned"] is True
+    detail = client.get(f"/api/tasks/{task_id}").json()
+    assert detail["filename"] == "季度预算.xlsx"
+    assert detail["pinned"] is True
+    assert "original_markdown" in detail
+    assert client.delete(f"/api/tasks/{task_id}").status_code == 200
+
+
+def test_convert_text_snippet_and_batch_delete() -> None:
+    resp = client.post(
+        "/api/convert-text",
+        json={
+            "title": "网页摘录",
+            "content": "<h1>Hello Snippet</h1><p>Converted from HTML snippet.</p>",
+            "format": "html",
+            "engine": "markitdown",
+        },
+    )
+    assert resp.status_code == 202
+    task_id = resp.json()["task_id"]
+    result = _wait_task(task_id)
+    assert result["status"] == "completed"
+    assert "Hello Snippet" in result["markdown"]
+
+    del_resp = client.post("/api/tasks/batch-delete", json={"task_ids": [task_id]})
+    assert del_resp.status_code == 200
+    assert task_id in del_resp.json()["deleted"]
+
+
+def test_recovers_interrupted_tasks(tmp_path) -> None:
+    import json
+
+    from app.tasks import TaskManager
+
+    task_dir = tmp_path / "tasks" / "abc123"
+    task_dir.mkdir(parents=True)
+    (task_dir / "source.xlsx").write_bytes(_make_xlsx_bytes())
+    (task_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "task_id": "abc123",
+                "filename": "budget.xlsx",
+                "file_size": 1,
+                "engine_requested": "markitdown",
+                "engine_used": None,
+                "status": "processing",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "finished_at": None,
+                "duration_ms": None,
+                "error": None,
+                "markdown_length": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = TaskManager(data_dir=tmp_path, max_workers=1)
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        meta = manager.get_task("abc123")
+        if meta and meta["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.2)
+    assert meta is not None and meta["status"] == "completed", meta
+
+
 def test_health_reports_both_engines() -> None:
     resp = client.get("/api/health")
     assert resp.status_code == 200
