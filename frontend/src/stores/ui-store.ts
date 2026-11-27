@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  ConversionOptions,
   EditSubMode,
   EngineChoice,
   InspectorTab,
@@ -13,6 +14,10 @@ import type {
 } from "../types";
 
 const STORAGE_KEY = "markitdown_v1_config";
+const OPTIONS_STORAGE_KEY = "markitdown_v3_options";
+
+export const DEFAULT_VLM_PROMPT =
+  "请仔细分析这张文档插图（图表、架构图、流程图、公式截图或数据图），用简洁结构化的中文 Markdown 描述其核心内容与关键数据；如果是流程图或架构图，请附带一段 Mermaid 图表代码。";
 
 const DEFAULT_PROFILES: ServerProfile[] = [
   {
@@ -30,6 +35,14 @@ const DEFAULT_TYPOGRAPHY: ReaderTypography = {
   width: "standard",
 };
 
+const DEFAULT_CONVERSION_OPTIONS: ConversionOptions = {
+  pageRange: "",
+  ocrMode: "auto",
+  extractImages: true,
+  useVlm: false,
+  frontmatter: false,
+};
+
 export function loadConfig(): ServerConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -44,6 +57,15 @@ export function loadConfig(): ServerConfig {
         defaultEngine: parsed.defaultEngine || "auto",
         theme: parsed.theme || "system",
         autoSave: parsed.autoSave ?? true,
+        desktopNotifications: parsed.desktopNotifications ?? true,
+        vlmEnabled: parsed.vlmEnabled ?? false,
+        vlmBaseUrl: parsed.vlmBaseUrl || "https://api.openai.com/v1",
+        vlmApiKey: parsed.vlmApiKey || "",
+        vlmModel: parsed.vlmModel || "gpt-4o-mini",
+        vlmPrompt: parsed.vlmPrompt || DEFAULT_VLM_PROMPT,
+        vaultPath: parsed.vaultPath || "",
+        vaultSubfolder: parsed.vaultSubfolder ?? "MarkItDown",
+        vaultAutoFrontmatter: parsed.vaultAutoFrontmatter ?? true,
         typography: {
           font: parsed.typography?.font || DEFAULT_TYPOGRAPHY.font,
           fontSize: parsed.typography?.fontSize || DEFAULT_TYPOGRAPHY.fontSize,
@@ -65,9 +87,37 @@ export function loadConfig(): ServerConfig {
     defaultEngine: "auto",
     theme: "system",
     autoSave: true,
+    desktopNotifications: true,
+    vlmEnabled: false,
+    vlmBaseUrl: "https://api.openai.com/v1",
+    vlmApiKey: "",
+    vlmModel: "gpt-4o-mini",
+    vlmPrompt: DEFAULT_VLM_PROMPT,
+    vaultPath: "",
+    vaultSubfolder: "MarkItDown",
+    vaultAutoFrontmatter: true,
     typography: DEFAULT_TYPOGRAPHY,
     savedProfiles: DEFAULT_PROFILES,
   };
+}
+
+export function loadConversionOptions(): ConversionOptions {
+  try {
+    const raw = localStorage.getItem(OPTIONS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        pageRange: parsed.pageRange || "",
+        ocrMode: parsed.ocrMode || "auto",
+        extractImages: parsed.extractImages ?? true,
+        useVlm: parsed.useVlm ?? false,
+        frontmatter: parsed.frontmatter ?? false,
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_CONVERSION_OPTIONS;
 }
 
 export function persistConfig(cfg: ServerConfig): void {
@@ -78,9 +128,19 @@ export function persistConfig(cfg: ServerConfig): void {
   }
 }
 
+export function persistConversionOptions(opts: ConversionOptions): void {
+  try {
+    localStorage.setItem(OPTIONS_STORAGE_KEY, JSON.stringify(opts));
+  } catch {
+    // ignore
+  }
+}
+
 interface UiState {
   config: ServerConfig;
   engine: EngineChoice;
+  conversionOptions: ConversionOptions;
+  syncScroll: boolean;
   sidebarCollapsed: boolean;
   inspectorOpen: boolean;
   inspectorTab: InspectorTab;
@@ -100,6 +160,10 @@ interface UiState {
   setConfig: (next: ServerConfig | ((prev: ServerConfig) => ServerConfig)) => void;
   setTypography: (patch: Partial<ReaderTypography>) => void;
   setEngine: (engine: EngineChoice) => void;
+  setConversionOptions: (
+    next: Partial<ConversionOptions> | ((prev: ConversionOptions) => ConversionOptions),
+  ) => void;
+  setSyncScroll: (v: boolean | ((prev: boolean) => boolean)) => void;
   setSidebarCollapsed: (v: boolean | ((prev: boolean) => boolean)) => void;
   setInspectorOpen: (v: boolean | ((prev: boolean) => boolean)) => void;
   setInspectorTab: (tab: InspectorTab) => void;
@@ -119,10 +183,13 @@ interface UiState {
 }
 
 const initialConfig = loadConfig();
+const initialOptions = loadConversionOptions();
 
 export const useUiStore = create<UiState>((set) => ({
   config: initialConfig,
   engine: initialConfig.defaultEngine,
+  conversionOptions: initialOptions,
+  syncScroll: true,
   sidebarCollapsed: false,
   inspectorOpen: true,
   inspectorTab: "toc",
@@ -155,6 +222,17 @@ export const useUiStore = create<UiState>((set) => ({
       return { config: resolved };
     }),
   setEngine: (engine) => set({ engine }),
+  setConversionOptions: (next) =>
+    set((state) => {
+      const resolved =
+        typeof next === "function" ? next(state.conversionOptions) : { ...state.conversionOptions, ...next };
+      persistConversionOptions(resolved);
+      return { conversionOptions: resolved };
+    }),
+  setSyncScroll: (v) =>
+    set((s) => ({
+      syncScroll: typeof v === "function" ? v(s.syncScroll) : v,
+    })),
   setSidebarCollapsed: (v) =>
     set((s) => ({
       sidebarCollapsed: typeof v === "function" ? v(s.sidebarCollapsed) : v,

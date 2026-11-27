@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from "react";
 import {
   Archive,
   ArrowUpDown,
+  Ban,
   Check,
   CheckSquare,
   Cpu,
@@ -22,6 +23,7 @@ import {
   Trash2,
   Upload,
   X,
+  XCircle,
 } from "lucide-react";
 import type {
   ConversionTask,
@@ -47,6 +49,8 @@ import { cn } from "@/lib/utils";
 
 interface LibrarySidebarProps {
   tasks: ConversionTask[];
+  searchTasks?: ConversionTask[] | null;
+  searching?: boolean;
   selectedId: string | null;
   onSelectTask: (taskId: string) => void;
   onOpenConvertHub: () => void;
@@ -68,6 +72,7 @@ interface LibrarySidebarProps {
   onTogglePin: (task: ConversionTask) => void;
   onRenameTask: (taskId: string, newName: string) => void;
   onRetryTask: (taskId: string, engine?: EngineChoice) => void;
+  onCancelTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
   onDownloadTaskMd: (task: ConversionTask) => void;
   className?: string;
@@ -112,6 +117,8 @@ export function getFileTypeVisual(filename: string) {
 
 export function LibrarySidebar({
   tasks,
+  searchTasks,
+  searching,
   selectedId,
   onSelectTask,
   onOpenConvertHub,
@@ -133,6 +140,7 @@ export function LibrarySidebar({
   onTogglePin,
   onRenameTask,
   onRetryTask,
+  onCancelTask,
   onDeleteTask,
   onDownloadTaskMd,
   className,
@@ -143,15 +151,20 @@ export function LibrarySidebar({
 
   const filteredTasks = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    const list = tasks.filter((t) => {
-      if (q && !t.filename.toLowerCase().includes(q)) return false;
+    const baseList = q && searchTasks ? searchTasks : tasks;
+    const list = baseList.filter((t) => {
+      if (q && !searchTasks && !t.filename.toLowerCase().includes(q)) return false;
       if (statusFilter === "pinned") return Boolean(t.pinned);
       if (statusFilter === "completed") return t.status === "completed";
-      if (statusFilter === "failed") return t.status === "failed";
+      if (statusFilter === "failed") return t.status === "failed" || t.status === "cancelled";
       if (statusFilter === "active")
         return t.status === "queued" || t.status === "processing";
       return true;
     });
+
+    if (q && searchTasks) {
+      return list;
+    }
 
     return [...list].sort((a, b) => {
       if (Boolean(a.pinned) !== Boolean(b.pinned)) {
@@ -168,9 +181,12 @@ export function LibrarySidebar({
       }
       return b.created_at.localeCompare(a.created_at);
     });
-  }, [tasks, searchQuery, statusFilter, sortField]);
+  }, [tasks, searchTasks, searchQuery, statusFilter, sortField]);
 
   const groupedTasks = useMemo(() => {
+    if (searchQuery.trim()) {
+      return [{ label: `全文搜索命中`, items: filteredTasks }];
+    }
     const groups: { label: string; items: ConversionTask[] }[] = [];
     const map = new Map<string, ConversionTask[]>();
 
@@ -185,7 +201,7 @@ export function LibrarySidebar({
       bucket.push(task);
     }
     return groups;
-  }, [filteredTasks]);
+  }, [filteredTasks, searchQuery]);
 
   const startRename = (task: ConversionTask, e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -208,7 +224,7 @@ export function LibrarySidebar({
       completed: tasks.filter((t) => t.status === "completed").length,
       active: tasks.filter((t) => t.status === "queued" || t.status === "processing")
         .length,
-      failed: tasks.filter((t) => t.status === "failed").length,
+      failed: tasks.filter((t) => t.status === "failed" || t.status === "cancelled").length,
     }),
     [tasks],
   );
@@ -278,15 +294,19 @@ export function LibrarySidebar({
         </Tooltip>
       </div>
 
-      {/* Search & Sort Bar */}
+      {/* Full-Text Search & Sort Bar */}
       <div className="flex items-center gap-1.5 px-3 pb-2">
         <div className="flex flex-1 items-center gap-1.5 rounded-xl border border-border bg-card/90 px-2.5 py-1.5 text-xs shadow-2xs focus-within:border-primary">
-          <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          {searching ? (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+          ) : (
+            <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="搜索文档名称..."
+            placeholder="搜索文件名或正文关键词..."
             className="w-full bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground"
           />
           {searchQuery && (
@@ -343,7 +363,7 @@ export function LibrarySidebar({
               ["pinned", "星标", counts.pinned],
               ["completed", "完成", counts.completed],
               ["active", "进行", counts.active],
-              ["failed", "失败", counts.failed],
+              ["failed", "异常", counts.failed],
             ] as const
           ).map(([key, label, count]) => (
             <button
@@ -440,6 +460,7 @@ export function LibrarySidebar({
                   const isChecked = selectedTaskIds.includes(task.task_id);
                   const isProcessing =
                     task.status === "queued" || task.status === "processing";
+                  const pct = Math.max(0, Math.min(100, task.progress_pct ?? 0));
 
                   return (
                     <div
@@ -452,7 +473,7 @@ export function LibrarySidebar({
                         }
                       }}
                       className={cn(
-                        "group relative flex items-center gap-2.5 rounded-xl border p-2.5 transition-all cursor-pointer",
+                        "group relative flex items-start gap-2.5 rounded-xl border p-2.5 transition-all cursor-pointer",
                         isSelected && !batchMode
                           ? "border-primary/50 bg-selection shadow-2xs"
                           : isChecked && batchMode
@@ -467,7 +488,7 @@ export function LibrarySidebar({
                             e.stopPropagation();
                             onToggleBatchSelect(task.task_id);
                           }}
-                          className="text-primary shrink-0"
+                          className="mt-1 text-primary shrink-0"
                         >
                           {isChecked ? (
                             <CheckSquare className="h-4 w-4" />
@@ -479,7 +500,7 @@ export function LibrarySidebar({
 
                       <div
                         className={cn(
-                          "flex h-9 w-9 shrink-0 flex-col items-center justify-center rounded-xl",
+                          "mt-0.5 flex h-9 w-9 shrink-0 flex-col items-center justify-center rounded-xl",
                           visual.bg,
                         )}
                       >
@@ -521,7 +542,7 @@ export function LibrarySidebar({
                           </div>
                         )}
 
-                        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                           {task.status === "completed" ? (
                             <span className="inline-flex items-center gap-1 font-medium text-success">
                               <span className="h-1.5 w-1.5 rounded-full bg-success" />
@@ -532,21 +553,66 @@ export function LibrarySidebar({
                               <span className="h-1.5 w-1.5 rounded-full bg-destructive" />
                               解析失败
                             </span>
+                          ) : task.status === "cancelled" ? (
+                            <span className="inline-flex items-center gap-1 font-medium text-muted-foreground">
+                              <Ban className="h-3 w-3" />
+                              已取消
+                            </span>
                           ) : (
                             <span className="inline-flex items-center gap-1 font-medium text-primary">
                               <Loader2 className="h-3 w-3 animate-spin" />
-                              {task.status === "processing" ? "解析中" : "排队中"}
+                              <span>{pct > 0 ? `${pct}%` : "排队中"}</span>
                             </span>
                           )}
                           <span>·</span>
                           <span>{formatBytes(task.file_size)}</span>
+                          {task.assets && task.assets.length > 0 && (
+                            <>
+                              <span>·</span>
+                              <span>{task.assets.length} 图</span>
+                            </>
+                          )}
                           <span>·</span>
                           <span>{formatRelativeTime(task.created_at)}</span>
                         </div>
 
+                        {/* Full-text search match snippet */}
+                        {task.match_snippet && (
+                          <p className="mt-1 line-clamp-2 rounded-md bg-primary/[0.06] px-1.5 py-0.5 text-[10.5px] leading-snug text-muted-foreground">
+                            {task.match_snippet}
+                          </p>
+                        )}
+
+                        {/* Live progress bar & stage + cancel */}
                         {isProcessing && (
-                          <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-primary/15">
-                            <div className="h-full w-2/5 rounded-full bg-primary animate-shimmer" />
+                          <div className="mt-1.5 space-y-1">
+                            <div className="flex items-center justify-between gap-1 text-[10px] text-muted-foreground">
+                              <span className="truncate">
+                                {task.progress_stage || (task.status === "processing" ? "正在解析..." : "等待队列...")}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onCancelTask(task.task_id);
+                                }}
+                                className="inline-flex items-center gap-0.5 shrink-0 text-destructive hover:underline"
+                                title="取消当前解析任务"
+                              >
+                                <XCircle className="h-3 w-3" />
+                                <span>取消</span>
+                              </button>
+                            </div>
+                            <div className="h-1 w-full overflow-hidden rounded-full bg-primary/15">
+                              {pct > 0 ? (
+                                <div
+                                  style={{ width: `${pct}%` }}
+                                  className="h-full rounded-full bg-primary transition-all duration-300"
+                                />
+                              ) : (
+                                <div className="h-full w-2/5 rounded-full bg-primary animate-shimmer" />
+                              )}
+                            </div>
                           </div>
                         )}
                       </div>
@@ -567,6 +633,18 @@ export function LibrarySidebar({
                               </button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" className="w-44">
+                              {isProcessing && (
+                                <>
+                                  <DropdownMenuItem
+                                    destructive
+                                    onClick={() => onCancelTask(task.task_id)}
+                                  >
+                                    <XCircle className="h-3.5 w-3.5" />
+                                    <span>取消当前解析</span>
+                                  </DropdownMenuItem>
+                                  <DropdownMenuSeparator />
+                                </>
+                              )}
                               <DropdownMenuItem onClick={() => onTogglePin(task)}>
                                 <Pin className="h-3.5 w-3.5" />
                                 <span>{task.pinned ? "取消星标置顶" : "星标置顶"}</span>

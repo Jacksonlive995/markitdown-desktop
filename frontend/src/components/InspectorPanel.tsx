@@ -309,6 +309,32 @@ export function InspectorPanel({
                   {task.task_id}
                 </span>
               </div>
+              {task.assets && task.assets.length > 0 && (
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-muted-foreground">提取插图资源</span>
+                  <Badge variant="secondary">{task.assets.length} 张</Badge>
+                </div>
+              )}
+              {task.engine_snapshots && task.engine_snapshots.length > 1 && (
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-muted-foreground">双引擎 A/B 快照</span>
+                  <Badge variant="success">已就绪</Badge>
+                </div>
+              )}
+              {task.source_url && (
+                <div className="flex items-center justify-between gap-2 px-3 py-2">
+                  <span className="shrink-0 text-muted-foreground">来源网址</span>
+                  <a
+                    href={task.source_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="truncate text-primary hover:underline"
+                    title={task.source_url}
+                  >
+                    {task.source_url}
+                  </a>
+                </div>
+              )}
             </div>
           </div>
 

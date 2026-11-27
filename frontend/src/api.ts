@@ -1,4 +1,13 @@
-import type { ConversionTask, EngineChoice, HealthResponse, ServerConfig } from "./types";
+import type {
+  ConversionOptions,
+  ConversionTask,
+  EngineChoice,
+  HealthResponse,
+  ServerConfig,
+  SourcePreviewResponse,
+  TaskEventMessage,
+  VlmConfig,
+} from "./types";
 
 export function normalizeBaseUrl(url: string): string {
   return (url || "http://127.0.0.1:8000").trim().replace(/\/+$/, "");
@@ -12,6 +21,27 @@ function buildHeaders(config: Pick<ServerConfig, "token">, extra?: Record<string
   return headers;
 }
 
+function buildVlmPayload(config: Pick<VlmConfig, "vlmEnabled" | "vlmBaseUrl" | "vlmApiKey" | "vlmModel" | "vlmPrompt">) {
+  return {
+    enabled: Boolean(config.vlmEnabled),
+    base_url: config.vlmBaseUrl?.trim() || "",
+    api_key: config.vlmApiKey?.trim() || "",
+    model: config.vlmModel?.trim() || "",
+    prompt: config.vlmPrompt?.trim() || "",
+  };
+}
+
+async function parseErrorDetail(res: Response, fallbackPrefix: string): Promise<string> {
+  let detail = await res.text();
+  try {
+    const parsed = JSON.parse(detail);
+    if (parsed.detail) detail = parsed.detail;
+  } catch {
+    // ignore json parse error
+  }
+  return `${fallbackPrefix} (${res.status}): ${detail || res.statusText}`;
+}
+
 export function triggerBlobDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -21,6 +51,19 @@ export function triggerBlobDownload(blob: Blob, filename: string): void {
   a.click();
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export function getAssetUrl(
+  config: Pick<ServerConfig, "baseUrl" | "token">,
+  taskId: string,
+  assetFilename: string,
+): string {
+  const cleanName = assetFilename.replace(/^assets\//, "");
+  const base = `${normalizeBaseUrl(config.baseUrl)}/api/tasks/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(cleanName)}`;
+  if (config.token?.trim()) {
+    return `${base}?token=${encodeURIComponent(config.token.trim())}`;
+  }
+  return base;
 }
 
 export async function fetchHealth(
@@ -42,7 +85,6 @@ export async function testServerConnection(
   const health = await fetchHealth(config);
   const latencyMs = Math.max(1, Math.round(performance.now() - start));
 
-  // Verify token against /api/tasks if auth is required or token is provided
   let authOk = true;
   if (health.auth_required || config.token?.trim()) {
     const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/tasks`, {
@@ -55,14 +97,39 @@ export async function testServerConnection(
   return { health, latencyMs, authOk };
 }
 
+export async function testVlmConnection(
+  config: ServerConfig,
+): Promise<{ ok: boolean; model: string; reply: string }> {
+  const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/vlm/test`, {
+    method: "POST",
+    headers: buildHeaders(config, { "Content-Type": "application/json" }),
+    body: JSON.stringify(buildVlmPayload({ ...config, vlmEnabled: true })),
+  });
+  if (!res.ok) {
+    throw new Error(await parseErrorDetail(res, "VLM 连接测试失败"));
+  }
+  return res.json();
+}
+
 export async function uploadFile(
   config: ServerConfig,
   file: File,
   engine: EngineChoice,
+  options?: ConversionOptions,
 ): Promise<ConversionTask> {
   const form = new FormData();
   form.append("file", file);
   form.append("engine", engine);
+  if (options) {
+    form.append("page_range", options.pageRange || "");
+    form.append("ocr_mode", options.ocrMode || "auto");
+    form.append("extract_images", String(options.extractImages));
+    form.append("use_vlm", String(options.useVlm && config.vlmEnabled));
+    form.append("frontmatter", String(options.frontmatter));
+    if (options.useVlm && config.vlmEnabled) {
+      form.append("vlm_config", JSON.stringify(buildVlmPayload(config)));
+    }
+  }
 
   const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/convert`, {
     method: "POST",
@@ -70,14 +137,7 @@ export async function uploadFile(
     body: form,
   });
   if (!res.ok) {
-    let detail = await res.text();
-    try {
-      const parsed = JSON.parse(detail);
-      if (parsed.detail) detail = parsed.detail;
-    } catch {
-      // ignore json parse error
-    }
-    throw new Error(`上传失败 (${res.status}): ${detail}`);
+    throw new Error(await parseErrorDetail(res, "上传失败"));
   }
   return res.json();
 }
@@ -89,6 +149,7 @@ export async function convertTextSnippet(
     content: string;
     format: "html" | "txt" | "csv" | "json" | "xml" | "md";
     engine?: EngineChoice;
+    frontmatter?: boolean;
   },
 ): Promise<ConversionTask> {
   const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/convert-text`, {
@@ -99,17 +160,48 @@ export async function convertTextSnippet(
       content: payload.content,
       format: payload.format,
       engine: payload.engine ?? "markitdown",
+      frontmatter: payload.frontmatter ?? false,
     }),
   });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`片段转换失败 (${res.status}): ${detail}`);
+    throw new Error(await parseErrorDetail(res, "片段转换失败"));
   }
   return res.json();
 }
 
-export async function listTasks(config: ServerConfig): Promise<ConversionTask[]> {
-  const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/tasks`, {
+export async function convertUrl(
+  config: ServerConfig,
+  url: string,
+  engine: EngineChoice,
+  options?: ConversionOptions,
+): Promise<ConversionTask> {
+  const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/convert-url`, {
+    method: "POST",
+    headers: buildHeaders(config, { "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      url: url.trim(),
+      engine,
+      page_range: options?.pageRange || "",
+      ocr_mode: options?.ocrMode || "auto",
+      extract_images: options?.extractImages ?? true,
+      use_vlm: Boolean(options?.useVlm && config.vlmEnabled),
+      frontmatter: options?.frontmatter ?? false,
+      vlm_config: options?.useVlm && config.vlmEnabled ? buildVlmPayload(config) : null,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(await parseErrorDetail(res, "URL 抓取转换失败"));
+  }
+  return res.json();
+}
+
+export async function listTasks(config: ServerConfig, query?: string): Promise<ConversionTask[]> {
+  const params = new URLSearchParams();
+  if (query && query.trim()) {
+    params.set("q", query.trim());
+  }
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/tasks${qs}`, {
     headers: buildHeaders(config),
   });
   if (!res.ok) {
@@ -117,6 +209,32 @@ export async function listTasks(config: ServerConfig): Promise<ConversionTask[]>
   }
   const data = await res.json();
   return data.tasks ?? [];
+}
+
+export function subscribeTaskEvents(
+  config: Pick<ServerConfig, "baseUrl" | "token">,
+  onEvent: (event: TaskEventMessage) => void,
+  onError?: () => void,
+): () => void {
+  const base = `${normalizeBaseUrl(config.baseUrl)}/api/tasks/events`;
+  const url = config.token?.trim()
+    ? `${base}?token=${encodeURIComponent(config.token.trim())}`
+    : base;
+  const es = new EventSource(url);
+  es.onmessage = (evt) => {
+    try {
+      const parsed = JSON.parse(evt.data) as TaskEventMessage;
+      onEvent(parsed);
+    } catch {
+      // ignore malformed event
+    }
+  };
+  es.onerror = () => {
+    onError?.();
+  };
+  return () => {
+    es.close();
+  };
 }
 
 export async function getTask(config: ServerConfig, taskId: string): Promise<ConversionTask> {
@@ -165,14 +283,37 @@ export async function retryTask(
   config: ServerConfig,
   taskId: string,
   engine?: EngineChoice,
+  options?: ConversionOptions,
 ): Promise<ConversionTask> {
+  const body: Record<string, unknown> = { engine: engine ?? null };
+  if (options) {
+    body.page_range = options.pageRange || "";
+    body.ocr_mode = options.ocrMode || "auto";
+    body.extract_images = options.extractImages;
+    body.use_vlm = Boolean(options.useVlm && config.vlmEnabled);
+    body.frontmatter = options.frontmatter;
+    if (options.useVlm && config.vlmEnabled) {
+      body.vlm_config = buildVlmPayload(config);
+    }
+  }
   const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/tasks/${taskId}/retry`, {
     method: "POST",
     headers: buildHeaders(config, { "Content-Type": "application/json" }),
-    body: JSON.stringify({ engine: engine ?? null }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(`重试失败 (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function cancelTask(config: ServerConfig, taskId: string): Promise<ConversionTask> {
+  const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/tasks/${taskId}/cancel`, {
+    method: "POST",
+    headers: buildHeaders(config),
+  });
+  if (!res.ok) {
+    throw new Error(`取消任务失败 (HTTP ${res.status})`);
   }
   return res.json();
 }
@@ -200,6 +341,64 @@ export async function batchDeleteTasks(config: ServerConfig, taskIds: string[]):
   return data.deleted ?? [];
 }
 
+export async function analyzeTaskAsset(
+  config: ServerConfig,
+  taskId: string,
+  assetFilename: string,
+  prompt?: string,
+): Promise<{ filename: string; model: string; description: string }> {
+  const cleanName = assetFilename.replace(/^assets\//, "");
+  const res = await fetch(
+    `${normalizeBaseUrl(config.baseUrl)}/api/tasks/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(cleanName)}/analyze`,
+    {
+      method: "POST",
+      headers: buildHeaders(config, { "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        vlm_config: buildVlmPayload({ ...config, vlmEnabled: true }),
+        prompt: prompt || null,
+      }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(await parseErrorDetail(res, "AI 视觉解读失败"));
+  }
+  return res.json();
+}
+
+export async function fetchSourcePreview(
+  config: ServerConfig,
+  taskId: string,
+): Promise<SourcePreviewResponse> {
+  const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/tasks/${taskId}/source-preview`, {
+    headers: buildHeaders(config),
+  });
+  if (!res.ok) {
+    throw new Error(`加载 Office 原件预览失败 (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function exportTaskToVault(
+  config: ServerConfig,
+  taskId: string,
+  markdownOverride?: string,
+): Promise<{ md_path: string; assets_dir?: string | null; assets_copied: number }> {
+  const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/tasks/${taskId}/export-to-vault`, {
+    method: "POST",
+    headers: buildHeaders(config, { "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      vault_path: config.vaultPath,
+      subfolder: config.vaultSubfolder || "MarkItDown",
+      include_frontmatter: config.vaultAutoFrontmatter,
+      markdown: markdownOverride ?? null,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(await parseErrorDetail(res, "写入知识库失败"));
+  }
+  return res.json();
+}
+
 export function downloadLocalMarkdown(markdown: string, filename: string, taskId: string): void {
   const stem = filename.replace(/\.[^.]+$/, "") || taskId;
   const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
@@ -212,8 +411,40 @@ export function downloadLocalTxt(plainText: string, filename: string, taskId: st
   triggerBlobDownload(blob, `${stem}.txt`);
 }
 
-export function downloadLocalHtml(htmlBody: string, filename: string, taskId: string): void {
+async function inlineHtmlImagesAsBase64(htmlBody: string): Promise<string> {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(htmlBody, "text/html");
+  const imgs = Array.from(doc.querySelectorAll("img"));
+  await Promise.all(
+    imgs.map(async (img) => {
+      const src = img.getAttribute("src");
+      if (!src || src.startsWith("data:")) return;
+      try {
+        const resp = await fetch(src);
+        if (!resp.ok) return;
+        const blob = await resp.blob();
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+        img.setAttribute("src", dataUrl);
+      } catch {
+        // leave original src on failure
+      }
+    }),
+  );
+  return doc.body.innerHTML;
+}
+
+export async function downloadLocalHtml(
+  htmlBody: string,
+  filename: string,
+  taskId: string,
+): Promise<void> {
   const stem = filename.replace(/\.[^.]+$/, "") || taskId;
+  const inlinedBody = await inlineHtmlImagesAsBase64(htmlBody);
   const fullHtml = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -251,7 +482,7 @@ export function downloadLocalHtml(htmlBody: string, filename: string, taskId: st
   </style>
 </head>
 <body>
-${htmlBody}
+${inlinedBody}
 </body>
 </html>`;
   const blob = new Blob([fullHtml], { type: "text/html;charset=utf-8" });
@@ -287,6 +518,7 @@ export function printDocumentAsPdf(htmlBody: string, filename: string): void {
     th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
     th { background: #f3f4f6; }
     blockquote { border-left: 3px solid #007aff; margin: 12px 0; padding: 4px 14px; color: #555; }
+    img { max-width: 100%; }
   </style>
 </head>
 <body>

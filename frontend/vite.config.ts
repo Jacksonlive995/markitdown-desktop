@@ -14,7 +14,42 @@ export default defineConfig({
   },
   clearScreen: false,
   build: {
-    chunkSizeWarningLimit: 1600,
+    chunkSizeWarningLimit: 700,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (
+              id.includes("@codemirror") ||
+              id.includes("@uiw/react-codemirror") ||
+              id.includes("@lezer")
+            ) {
+              return "codemirror";
+            }
+            if (
+              id.includes("katex") ||
+              id.includes("rehype-") ||
+              id.includes("remark-") ||
+              id.includes("react-markdown") ||
+              id.includes("highlight.js") ||
+              id.includes("lowlight") ||
+              id.includes("micromark") ||
+              id.includes("mdast") ||
+              id.includes("hast")
+            ) {
+              return "markdown-katex";
+            }
+            if (id.includes("radix-ui") || id.includes("@radix-ui") || id.includes("cmdk")) {
+              return "radix-ui";
+            }
+            if (id.includes("lucide-react")) {
+              return "lucide";
+            }
+          }
+          return undefined;
+        },
+      },
+    },
   },
   server: {
     port: 1420,

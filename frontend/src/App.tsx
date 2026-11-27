@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast, Toaster } from "sonner";
 import {
   Archive,
+  Ban,
+  BookMarked,
   Check,
   ChevronDown,
   Code2,
@@ -25,25 +27,32 @@ import {
   RotateCcw,
   Save,
   Settings,
+  Share2,
   SlidersHorizontal,
   Sparkles,
   SplitSquareHorizontal,
   Sun,
   Trash2,
+  XCircle,
 } from "lucide-react";
 import {
+  analyzeTaskAsset,
   batchDeleteTasks,
+  cancelTask,
   convertTextSnippet,
+  convertUrl,
   deleteTask,
   downloadExportZip,
   downloadLocalHtml,
   downloadLocalMarkdown,
   downloadLocalTxt,
+  exportTaskToVault,
   fetchHealth,
   getTask,
   listTasks,
   printDocumentAsPdf,
   retryTask,
+  subscribeTaskEvents,
   updateTaskMarkdown,
   updateTaskMeta,
   uploadFile,
@@ -52,7 +61,6 @@ import { CommandPalette } from "./components/CommandPalette";
 import { ConvertHub } from "./components/ConvertHub";
 import { InspectorPanel } from "./components/InspectorPanel";
 import { getFileTypeVisual, LibrarySidebar } from "./components/LibrarySidebar";
-import { MarkdownEditor } from "./components/MarkdownEditor";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { SettingsModal } from "./components/SettingsModal";
 import { SourceViewer } from "./components/SourceViewer";
@@ -92,6 +100,29 @@ import {
 } from "./utils/markdown";
 import { cn, isMac } from "./lib/utils";
 
+const MarkdownEditor = lazy(() => import("./components/MarkdownEditor"));
+
+function EditorLoadingFallback() {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-2.5 bg-card text-muted-foreground">
+      <Loader2 className="h-5 w-5 animate-spin text-primary" />
+      <span className="text-xs">正在按需加载 CodeMirror 6 源码编辑器...</span>
+    </div>
+  );
+}
+
+async function tryAutoStartLocalBackend(): Promise<boolean> {
+  try {
+    const win = window as Window & { __TAURI_INTERNALS__?: unknown };
+    if (!win.__TAURI_INTERNALS__) return false;
+    const { invoke } = await import("@tauri-apps/api/core");
+    const status = await invoke<string>("ensure_local_backend");
+    return status === "started" || status === "already_running";
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
   const {
     config,
@@ -99,6 +130,10 @@ export default function App() {
     setTypography,
     engine,
     setEngine,
+    conversionOptions,
+    setConversionOptions,
+    syncScroll,
+    setSyncScroll,
     sidebarCollapsed,
     setSidebarCollapsed,
     inspectorOpen,
@@ -139,12 +174,16 @@ export default function App() {
   const [healthOnline, setHealthOnline] = useState<boolean>(false);
 
   const [tasks, setTasks] = useState<ConversionTask[]>([]);
+  const [searchHits, setSearchHits] = useState<ConversionTask[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedTask, setSelectedTask] = useState<ConversionTask | null>(null);
   const [draftMarkdown, setDraftMarkdown] = useState("");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [exportingVault, setExportingVault] = useState(false);
   const [proofreadRightMode, setProofreadRightMode] = useState<"preview" | "edit">("preview");
   const [sourceWidthPct, setSourceWidthPct] = useState(46);
 
@@ -152,6 +191,14 @@ export default function App() {
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const compareContainerRef = useRef<HTMLDivElement | null>(null);
   const resizingRef = useRef(false);
+  const selectedIdRef = useRef<string | null>(null);
+  const dirtyRef = useRef(false);
+  const autoStartAttemptedRef = useRef(false);
+
+  selectedIdRef.current = selectedId;
+  dirtyRef.current = dirty;
+
+  const canWebShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
 
   // Listen to OS dark mode changes
   useEffect(() => {
@@ -183,6 +230,17 @@ export default function App() {
         const list = await listTasks(config);
         setTasks(list);
       } catch (err) {
+        // In Tauri local mode, attempt once to start local backend automatically
+        if (config.mode === "local" && !autoStartAttemptedRef.current) {
+          autoStartAttemptedRef.current = true;
+          const started = await tryAutoStartLocalBackend();
+          if (started) {
+            window.setTimeout(() => {
+              refreshServer(true);
+            }, 1800);
+            return;
+          }
+        }
         setHealth(null);
         setHealthOnline(false);
         if (!silent) {
@@ -199,7 +257,70 @@ export default function App() {
     refreshServer(true);
   }, [refreshServer]);
 
-  // Poll pending tasks
+  // Desktop notification helper when background tasks finish
+  const notifyTaskDone = useCallback(
+    (task: ConversionTask) => {
+      if (!config.desktopNotifications) return;
+      if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+      if (!document.hidden && selectedIdRef.current === task.task_id) return;
+      try {
+        new Notification("MarkItDown 转换完成", {
+          body: `「${task.filename}」已通过 ${task.engine_used || task.engine_requested} 解析完成`,
+        });
+      } catch {
+        // ignore notification errors
+      }
+    },
+    [config.desktopNotifications],
+  );
+
+  // Real-time SSE live updates for task progress & status changes
+  useEffect(() => {
+    if (!healthOnline) return;
+    const unsubscribe = subscribeTaskEvents(config, (evt) => {
+      if (!evt.task) return;
+      const incoming = evt.task;
+
+      if (evt.type === "task_deleted") {
+        setTasks((prev) => prev.filter((t) => t.task_id !== incoming.task_id));
+        if (selectedIdRef.current === incoming.task_id) {
+          setSelectedId(null);
+        }
+        return;
+      }
+
+      setTasks((prev) => {
+        const exists = prev.some((t) => t.task_id === incoming.task_id);
+        if (exists) {
+          return prev.map((t) => (t.task_id === incoming.task_id ? { ...t, ...incoming } : t));
+        }
+        return [incoming, ...prev];
+      });
+
+      if (selectedIdRef.current === incoming.task_id) {
+        if (evt.type === "task_completed") {
+          getTask(config, incoming.task_id)
+            .then((detail) => {
+              setSelectedTask(detail);
+              if (!dirtyRef.current) {
+                setDraftMarkdown(detail.markdown ?? "");
+              }
+            })
+            .catch(() => {});
+        } else {
+          setSelectedTask((prev) => (prev ? { ...prev, ...incoming } : incoming));
+        }
+      }
+
+      if (evt.type === "task_completed") {
+        notifyTaskDone(incoming);
+      }
+    });
+
+    return unsubscribe;
+  }, [config, healthOnline, notifyTaskDone]);
+
+  // Fallback polling for active tasks (if SSE ever drops)
   useEffect(() => {
     const hasPending = tasks.some(
       (t) => t.status === "queued" || t.status === "processing",
@@ -220,10 +341,38 @@ export default function App() {
       } catch {
         // ignore transient polling error
       }
-    }, 1500);
+    }, 3000);
 
     return () => window.clearInterval(timer);
   }, [tasks, config, selectedId, dirty]);
+
+  // Full-text backend search (filename + Markdown body content)
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchHits(null);
+      setSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      listTasks(config, q)
+        .then((res) => {
+          if (!cancelled) setSearchHits(res);
+        })
+        .catch(() => {
+          if (!cancelled) setSearchHits(null);
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, 220);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [config, searchQuery]);
 
   // Load selected task details
   useEffect(() => {
@@ -386,7 +535,7 @@ export default function App() {
     }
   };
 
-  // File upload handler
+  // File upload handler (supports single, multi, and recursive folder uploads)
   const handleUploadFiles = async (files: FileList | File[]) => {
     const arr = Array.from(files);
     if (arr.length === 0) return;
@@ -394,7 +543,7 @@ export default function App() {
     try {
       let lastId: string | null = null;
       for (const file of arr) {
-        const created = await uploadFile(config, file, engine);
+        const created = await uploadFile(config, file, engine, conversionOptions);
         lastId = created.task_id;
       }
       const list = await listTasks(config);
@@ -416,6 +565,21 @@ export default function App() {
     }
   };
 
+  // URL fetch conversion handler
+  const handleConvertUrl = async (url: string) => {
+    try {
+      const created = await convertUrl(config, url, engine, conversionOptions);
+      const list = await listTasks(config);
+      setTasks(list);
+      setSelectedId(created.task_id);
+      setWorkspaceMode("read");
+      setMobileTab("workspace");
+      toast.success(`已抓取「${created.filename}」并进入解析队列`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "URL 抓取转换失败");
+    }
+  };
+
   // Snippet conversion handler
   const handleConvertSnippet = async (payload: {
     title: string;
@@ -426,6 +590,7 @@ export default function App() {
       const created = await convertTextSnippet(config, {
         ...payload,
         engine: "markitdown",
+        frontmatter: conversionOptions.frontmatter,
       });
       const list = await listTasks(config);
       setTasks(list);
@@ -455,6 +620,57 @@ export default function App() {
       toast.success("已载入示例学术报告，可自由体验阅读排版、编辑、Diff 与清洗工具");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "载入示例失败，请确认后端服务已启动");
+    }
+  };
+
+  // Single-asset AI Vision (VLM) analysis handler
+  const handleAnalyzeAsset = async (assetFilename: string) => {
+    if (!selectedTask) return;
+    if (!config.vlmEnabled || !config.vlmBaseUrl.trim() || !config.vlmModel.trim()) {
+      toast.info("请先在设置 → AI 视觉 (VLM) 中配置 OpenAI 兼容模型地址与模型名称");
+      setSettingsOpen(true);
+      return;
+    }
+    try {
+      const res = await analyzeTaskAsset(config, selectedTask.task_id, assetFilename);
+      const quoted = res.description
+        .split(/\r?\n/)
+        .map((line) => (line.trim() ? `> ${line}` : ">"))
+        .join("\n");
+      const block = `\n\n> **AI 视觉解读 (${res.model})**\n>\n${quoted}\n`;
+      const targetPattern = new RegExp(
+        `(!\\[[^\\]]*\\]\\(assets/${assetFilename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\))`,
+      );
+      setDraftMarkdown((prev) =>
+        targetPattern.test(prev) ? prev.replace(targetPattern, `$1${block}`) : `${prev}${block}`,
+      );
+      setDirty(true);
+      toast.success(`已完成「${assetFilename}」的 AI 视觉解读并插入正文`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "AI 视觉解读失败");
+    }
+  };
+
+  // One-click export to local Obsidian / Knowledge Base vault
+  const handleExportToVault = async () => {
+    if (!selectedTask || selectedTask.status !== "completed") return;
+    if (!config.vaultPath.trim()) {
+      toast.info("请先在设置 → Obsidian 知识库中配置本地知识库目录路径");
+      setSettingsOpen(true);
+      return;
+    }
+    setExportingVault(true);
+    try {
+      const res = await exportTaskToVault(config, selectedTask.task_id, draftMarkdown);
+      toast.success(
+        res.assets_copied > 0
+          ? `已存入知识库：${res.md_path}（含 ${res.assets_copied} 张插图）`
+          : `已存入知识库：${res.md_path}`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "存入知识库失败");
+    } finally {
+      setExportingVault(false);
     }
   };
 
@@ -505,7 +721,7 @@ export default function App() {
 
   const handleRetryTask = async (taskId: string, overrideEngine?: EngineChoice) => {
     try {
-      const updated = await retryTask(config, taskId, overrideEngine);
+      const updated = await retryTask(config, taskId, overrideEngine, conversionOptions);
       setTasks((prev) => prev.map((t) => (t.task_id === taskId ? updated : t)));
       if (selectedId === taskId) {
         setSelectedTask(updated);
@@ -516,6 +732,19 @@ export default function App() {
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "重新解析失败");
+    }
+  };
+
+  const handleCancelTask = async (taskId: string) => {
+    try {
+      const updated = await cancelTask(config, taskId);
+      setTasks((prev) => prev.map((t) => (t.task_id === taskId ? updated : t)));
+      if (selectedId === taskId) {
+        setSelectedTask(updated);
+      }
+      toast.info("已取消该解析任务");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "取消任务失败");
     }
   };
 
@@ -551,7 +780,7 @@ export default function App() {
   const handleBatchExportZip = async (ids?: string[]) => {
     try {
       await downloadExportZip(config, ids && ids.length > 0 ? ids : undefined);
-      toast.success("已打包下载 ZIP 归档");
+      toast.success("已打包下载 ZIP 归档（含 Markdown 与 assets 插图）");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "批量导出失败");
     }
@@ -621,13 +850,13 @@ export default function App() {
     toast.success("已导出 .md 文件");
   };
 
-  const handleExportHtml = () => {
+  const handleExportHtml = async () => {
     if (!selectedTask) return;
     const htmlBody =
       previewArticleRef.current?.innerHTML ||
       `<pre>${draftMarkdown.replace(/</g, "&lt;")}</pre>`;
-    downloadLocalHtml(htmlBody, selectedTask.filename, selectedTask.task_id);
-    toast.success("已导出独立排版 .html 网页");
+    await downloadLocalHtml(htmlBody, selectedTask.filename, selectedTask.task_id);
+    toast.success("已导出独立排版 .html 网页（图片已自动转为 Base64 内嵌）");
   };
 
   const handleExportTxt = () => {
@@ -643,6 +872,21 @@ export default function App() {
       previewArticleRef.current?.innerHTML ||
       `<pre>${draftMarkdown.replace(/</g, "&lt;")}</pre>`;
     printDocumentAsPdf(htmlBody, selectedTask.filename);
+  };
+
+  const handleNativeShare = async () => {
+    if (!selectedTask || !canWebShare) return;
+    try {
+      const stem = selectedTask.filename.replace(/\.[^.]+$/, "") || selectedTask.task_id;
+      const file = new File([draftMarkdown], `${stem}.md`, { type: "text/markdown" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ title: stem, files: [file] });
+      } else {
+        await navigator.share({ title: stem, text: draftMarkdown });
+      }
+    } catch {
+      // user cancelled share sheet
+    }
   };
 
   const handleDownloadTaskFromSidebar = async (task: ConversionTask) => {
@@ -725,7 +969,7 @@ export default function App() {
                 <span className="text-muted-foreground/40">/</span>
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span
-                    className="truncate max-w-[140px] sm:max-w-[260px] text-[13px] font-semibold text-foreground"
+                    className="truncate max-w-[140px] sm:max-w-[240px] text-[13px] font-semibold text-foreground"
                     title={selectedTask.filename}
                   >
                     {selectedTask.filename}
@@ -772,13 +1016,13 @@ export default function App() {
             </div>
           )}
 
-          {/* Right: Command Palette + Save + Consolidated Export Menu + Inspector Toggle */}
+          {/* Right: Command Palette + Save + Obsidian Vault + Export Menu + Inspector Toggle */}
           <div className="flex items-center gap-1.5 shrink-0">
             <Button
               variant="secondary"
               size="sm"
               onClick={() => setCommandOpen(true)}
-              className="hidden lg:inline-flex gap-2 text-muted-foreground h-7.5 px-2.5"
+              className="hidden xl:inline-flex gap-2 text-muted-foreground h-7.5 px-2.5"
             >
               <CommandIcon className="h-3.5 w-3.5" />
               <span className="text-xs">命令面板</span>
@@ -806,15 +1050,29 @@ export default function App() {
                   </Button>
                 )}
 
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleCopyMarkdown}
-                  className="hidden sm:inline-flex h-7.5"
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                  <span>复制</span>
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={handleExportToVault}
+                      disabled={exportingVault}
+                      className="hidden md:inline-flex h-7.5 gap-1.5"
+                    >
+                      {exportingVault ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                      ) : (
+                        <BookMarked className="h-3.5 w-3.5 text-primary" />
+                      )}
+                      <span>存入知识库</span>
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {config.vaultPath
+                      ? `一键写入 ${config.vaultPath}/${config.vaultSubfolder || "MarkItDown"}`
+                      : "点击绑定 Obsidian / 本地知识库文件夹"}
+                  </TooltipContent>
+                </Tooltip>
 
                 {/* Consolidated Export Dropdown */}
                 <DropdownMenu>
@@ -825,15 +1083,25 @@ export default function App() {
                       <ChevronDown className="h-3 w-3 opacity-80" />
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-56">
-                    <DropdownMenuLabel>导出当前文档</DropdownMenuLabel>
+                  <DropdownMenuContent align="end" className="w-60">
+                    <DropdownMenuLabel>知识库与本地导出</DropdownMenuLabel>
+                    <DropdownMenuItem onClick={handleExportToVault}>
+                      <BookMarked className="h-3.5 w-3.5 text-primary" />
+                      <span>一键存入知识库 (Obsidian)</span>
+                    </DropdownMenuItem>
                     <DropdownMenuItem onClick={handleExportMd}>
                       <Download className="h-3.5 w-3.5" />
                       <span>导出 Markdown (.md)</span>
                     </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => handleBatchExportZip([selectedTask.task_id])}
+                    >
+                      <Archive className="h-3.5 w-3.5" />
+                      <span>打包当前文档与插图 (.zip)</span>
+                    </DropdownMenuItem>
                     <DropdownMenuItem onClick={handleExportHtml}>
                       <FileCode2 className="h-3.5 w-3.5" />
-                      <span>导出独立网页 (.html)</span>
+                      <span>导出独立网页 (.html 内嵌图片)</span>
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={handleExportTxt}>
                       <FileText className="h-3.5 w-3.5" />
@@ -843,6 +1111,12 @@ export default function App() {
                       <Printer className="h-3.5 w-3.5" />
                       <span>打印 / 导出 PDF (.pdf)</span>
                     </DropdownMenuItem>
+                    {canWebShare && (
+                      <DropdownMenuItem onClick={handleNativeShare}>
+                        <Share2 className="h-3.5 w-3.5" />
+                        <span>系统分享 (Share Sheet)</span>
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuSeparator />
                     <DropdownMenuLabel>复制到剪贴板</DropdownMenuLabel>
                     <DropdownMenuItem onClick={handleCopyMarkdown}>
@@ -928,14 +1202,13 @@ export default function App() {
               variant="ghost"
               size="icon-sm"
               onClick={() => setSettingsOpen(true)}
-              title="服务部署与偏好设置"
+              title="服务、VLM 模型与 Obsidian 知识库设置"
             >
               <Settings className="h-4 w-4" />
             </Button>
 
             {selectedTask && selectedTask.status === "completed" && (
               <>
-                {/* Desktop Inspector Toggle */}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -952,7 +1225,6 @@ export default function App() {
                   </TooltipContent>
                 </Tooltip>
 
-                {/* Mobile/Tablet Inspector Trigger */}
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -971,10 +1243,12 @@ export default function App() {
         {/* Main 3-Pane Workspace                                        */}
         {/* ============================================================ */}
         <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
-          {/* Left Library Sidebar (Desktop persistent, Mobile visible on 'library' tab) */}
+          {/* Left Library Sidebar */}
           {!sidebarCollapsed && (
             <LibrarySidebar
               tasks={tasks}
+              searchTasks={searchHits}
+              searching={searching}
               selectedId={selectedId}
               onSelectTask={handleSelectTask}
               onOpenConvertHub={handleOpenConvertHub}
@@ -996,6 +1270,7 @@ export default function App() {
               onTogglePin={handleTogglePin}
               onRenameTask={handleRenameTask}
               onRetryTask={handleRetryTask}
+              onCancelTask={handleCancelTask}
               onDeleteTask={handleDeleteTask}
               onDownloadTaskMd={handleDownloadTaskFromSidebar}
               className="hidden md:flex"
@@ -1006,6 +1281,8 @@ export default function App() {
           {mobileTab === "library" && (
             <LibrarySidebar
               tasks={tasks}
+              searchTasks={searchHits}
+              searching={searching}
               selectedId={selectedId}
               onSelectTask={handleSelectTask}
               onOpenConvertHub={handleOpenConvertHub}
@@ -1027,6 +1304,7 @@ export default function App() {
               onTogglePin={handleTogglePin}
               onRenameTask={handleRenameTask}
               onRetryTask={handleRetryTask}
+              onCancelTask={handleCancelTask}
               onDeleteTask={handleDeleteTask}
               onDownloadTaskMd={handleDownloadTaskFromSidebar}
               className="flex w-full border-r-0 md:hidden"
@@ -1044,36 +1322,69 @@ export default function App() {
               <ConvertHub
                 engine={engine}
                 onEngineChange={setEngine}
+                options={conversionOptions}
+                onOptionsChange={setConversionOptions}
+                config={config}
+                onOpenSettings={() => setSettingsOpen(true)}
                 health={health}
                 uploading={uploading}
                 onUploadFiles={handleUploadFiles}
                 onConvertSnippet={handleConvertSnippet}
+                onConvertUrl={handleConvertUrl}
                 onLoadSample={handleLoadSample}
                 tasks={tasks}
                 onSelectTask={handleSelectTask}
               />
             ) : selectedTask.status === "queued" || selectedTask.status === "processing" ? (
-              <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+              <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
                 <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/12 text-primary">
                   <Loader2 className="h-7 w-7 animate-spin" />
                 </div>
-                <h2 className="text-base font-semibold text-foreground">
-                  正在使用 {selectedTask.engine_requested} 解析「{selectedTask.filename}」
-                </h2>
-                <p className="max-w-md text-xs text-muted-foreground leading-relaxed">
-                  扫描件 OCR、跨页复杂表格与学术论文版面分析可能需要数秒至数十秒，完成后将自动在此展示结果
-                </p>
+                <div className="space-y-1">
+                  <h2 className="text-base font-semibold text-foreground">
+                    正在使用 {selectedTask.engine_requested} 解析「{selectedTask.filename}」
+                  </h2>
+                  <p className="text-xs font-medium text-primary">
+                    {selectedTask.progress_stage || "准备解析环境"} · {selectedTask.progress_pct ?? 0}%
+                  </p>
+                </div>
+                <div className="w-full max-w-sm space-y-2">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
+                    <div
+                      style={{ width: `${Math.max(6, selectedTask.progress_pct ?? 6)}%` }}
+                      className="h-full rounded-full bg-primary transition-all duration-300"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    实时进度流已连接，完成后将自动展示结构化 Markdown 与提取的文档插图
+                  </p>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => handleCancelTask(selectedTask.task_id)}
+                >
+                  <XCircle className="h-3.5 w-3.5 text-destructive" />
+                  <span>取消此任务</span>
+                </Button>
               </div>
-            ) : selectedTask.status === "failed" ? (
+            ) : selectedTask.status === "failed" || selectedTask.status === "cancelled" ? (
               <div className="flex flex-1 flex-col items-center justify-center p-6">
-                <div className="w-full max-w-lg rounded-2xl border border-destructive/30 bg-destructive/10 p-6 space-y-4">
+                <div className="w-full max-w-lg rounded-2xl border border-border bg-card p-6 space-y-4 shadow-card">
                   <div className="space-y-1">
-                    <Badge variant="destructive">转换失败</Badge>
+                    {selectedTask.status === "cancelled" ? (
+                      <Badge variant="secondary" className="gap-1">
+                        <Ban className="h-3 w-3" />
+                        任务已取消
+                      </Badge>
+                    ) : (
+                      <Badge variant="destructive">转换失败</Badge>
+                    )}
                     <h3 className="text-base font-semibold text-foreground">
                       {selectedTask.filename}
                     </h3>
                   </div>
-                  <pre className="max-h-48 overflow-auto rounded-xl bg-background/80 p-3 font-mono text-xs text-destructive whitespace-pre-wrap">
+                  <pre className="max-h-48 overflow-auto rounded-xl bg-muted/60 p-3 font-mono text-xs text-destructive whitespace-pre-wrap">
                     {selectedTask.error || "未知解析错误"}
                   </pre>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1109,7 +1420,6 @@ export default function App() {
                 ref={previewScrollRef}
                 className="flex-1 overflow-y-auto px-5 py-7 sm:px-10 sm:py-9"
               >
-                {/* Document Header Banner inside Reader */}
                 <div
                   style={{
                     maxWidth:
@@ -1148,8 +1458,12 @@ export default function App() {
                         <span>耗时 {formatDuration(selectedTask.duration_ms)}</span>
                         <span>·</span>
                         <span>{stats.words.toLocaleString()} 词</span>
-                        <span>·</span>
-                        <span>约 {stats.readingMinutes} 分钟读完</span>
+                        {selectedTask.assets && selectedTask.assets.length > 0 && (
+                          <>
+                            <span>·</span>
+                            <span>{selectedTask.assets.length} 张插图</span>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1179,29 +1493,42 @@ export default function App() {
                   markdown={draftMarkdown}
                   typography={config.typography}
                   articleRef={previewArticleRef}
+                  config={config}
+                  taskId={selectedTask.task_id}
+                  onAnalyzeAsset={handleAnalyzeAsset}
                 />
               </div>
             ) : workspaceMode === "edit" ? (
               /* ======================================================== */
-              /* Mode 2: CodeMirror 6 Editor + Live Split / Diff          */
+              /* Mode 2: Lazy-loaded CodeMirror 6 + Sync Split + A/B Diff */
               /* ======================================================== */
-              <MarkdownEditor
-                value={draftMarkdown}
-                originalValue={selectedTask.original_markdown ?? selectedTask.markdown}
-                onChange={(next) => {
-                  setDraftMarkdown(next);
-                  setDirty(true);
-                }}
-                onCleanup={handleCleanup}
-                onRestoreOriginal={handleRestoreOriginal}
-                subMode={editSubMode}
-                onSubModeChange={setEditSubMode}
-                dark={effectiveDark}
-                typography={config.typography}
-              />
+              <Suspense fallback={<EditorLoadingFallback />}>
+                <MarkdownEditor
+                  value={draftMarkdown}
+                  originalValue={selectedTask.original_markdown ?? selectedTask.markdown}
+                  engineUsed={selectedTask.engine_used}
+                  engineResults={selectedTask.engine_results}
+                  onChange={(next) => {
+                    setDraftMarkdown(next);
+                    setDirty(true);
+                  }}
+                  onCleanup={handleCleanup}
+                  onRestoreOriginal={handleRestoreOriginal}
+                  onRetryOtherEngine={(eng) => handleRetryTask(selectedTask.task_id, eng)}
+                  subMode={editSubMode}
+                  onSubModeChange={setEditSubMode}
+                  syncScroll={syncScroll}
+                  onSyncScrollChange={setSyncScroll}
+                  dark={effectiveDark}
+                  typography={config.typography}
+                  config={config}
+                  taskId={selectedTask.task_id}
+                  onAnalyzeAsset={handleAnalyzeAsset}
+                />
+              </Suspense>
             ) : (
               /* ======================================================== */
-              /* Mode 3: Side-by-Side Source Proofread                    */
+              /* Mode 3: Side-by-Side Source Proofread (PDF/DOCX/XLSX/IMG)*/
               /* ======================================================== */
               <div
                 ref={compareContainerRef}
@@ -1228,7 +1555,7 @@ export default function App() {
                   className="hidden md:block w-1.5 shrink-0 cursor-col-resize bg-border/80 transition-colors hover:bg-primary"
                 />
 
-                {/* Right Pane in Proofread Mode: Toggleable between Preview & Editor */}
+                {/* Right Pane in Proofread Mode */}
                 <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-hidden bg-background">
                   <div className="flex items-center justify-between border-b border-border bg-toolbar/70 px-3.5 py-1.5 text-xs">
                     <span className="font-medium text-muted-foreground">
@@ -1268,23 +1595,36 @@ export default function App() {
                         markdown={draftMarkdown}
                         typography={config.typography}
                         articleRef={previewArticleRef}
+                        config={config}
+                        taskId={selectedTask.task_id}
+                        onAnalyzeAsset={handleAnalyzeAsset}
                       />
                     </div>
                   ) : (
-                    <MarkdownEditor
-                      value={draftMarkdown}
-                      originalValue={selectedTask.original_markdown ?? selectedTask.markdown}
-                      onChange={(next) => {
-                        setDraftMarkdown(next);
-                        setDirty(true);
-                      }}
-                      onCleanup={handleCleanup}
-                      onRestoreOriginal={handleRestoreOriginal}
-                      subMode="editor"
-                      onSubModeChange={() => {}}
-                      dark={effectiveDark}
-                      typography={config.typography}
-                    />
+                    <Suspense fallback={<EditorLoadingFallback />}>
+                      <MarkdownEditor
+                        value={draftMarkdown}
+                        originalValue={selectedTask.original_markdown ?? selectedTask.markdown}
+                        engineUsed={selectedTask.engine_used}
+                        engineResults={selectedTask.engine_results}
+                        onChange={(next) => {
+                          setDraftMarkdown(next);
+                          setDirty(true);
+                        }}
+                        onCleanup={handleCleanup}
+                        onRestoreOriginal={handleRestoreOriginal}
+                        onRetryOtherEngine={(eng) => handleRetryTask(selectedTask.task_id, eng)}
+                        subMode="editor"
+                        onSubModeChange={() => {}}
+                        syncScroll={syncScroll}
+                        onSyncScrollChange={setSyncScroll}
+                        dark={effectiveDark}
+                        typography={config.typography}
+                        config={config}
+                        taskId={selectedTask.task_id}
+                        onAnalyzeAsset={handleAnalyzeAsset}
+                      />
+                    </Suspense>
                   )}
                 </div>
               </div>
@@ -1343,7 +1683,9 @@ export default function App() {
               <>
                 <span>·</span>
                 <span>
-                  引擎：{health.engines.docling ? "MarkItDown + Docling 双引擎就绪" : "MarkItDown 就绪"}
+                  v{health.version || "3.0"} ·{" "}
+                  {health.engines.docling ? "MarkItDown + Docling 双引擎" : "MarkItDown"}
+                  {config.vlmEnabled ? ` + VLM (${config.vlmModel})` : ""}
                 </span>
               </>
             )}
@@ -1477,6 +1819,7 @@ export default function App() {
         <CommandPalette
           open={commandOpen}
           onOpenChange={setCommandOpen}
+          config={config}
           tasks={tasks}
           selectedTask={selectedTask}
           onSelectTask={handleSelectTask}
@@ -1487,12 +1830,13 @@ export default function App() {
           onCopyMarkdown={handleCopyMarkdown}
           onExportMd={handleExportMd}
           onExportHtml={handleExportHtml}
+          onExportToVault={handleExportToVault}
           onToggleTheme={toggleQuickTheme}
           onOpenSettings={() => setSettingsOpen(true)}
           dark={effectiveDark}
         />
 
-        {/* Settings Modal (Local & Remote Server Profiles + Test Connection) */}
+        {/* Settings Modal (Server + VLM + Obsidian Vault) */}
         <SettingsModal
           open={settingsOpen}
           config={config}

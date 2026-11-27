@@ -1,5 +1,46 @@
 # Progress Log - MarkItDown Desktop
 
+## 2026-11-27 · v3.0 全面升级落地（P1 → P4 全部完成并通过验证）
+- **P1 · 解析引擎增强、图文资源闭环与多模态 VLM 集成**：
+  - 新增 `backend/app/vlm.py`，基于 `httpx` 实现零额外依赖的 OpenAI 兼容多模态 VLM 客户端与 `MarkItDown(llm_client=...)` 适配器；支持 `POST /api/vlm/test` 测试连通性与 `POST /api/tasks/{id}/assets/{filename}/analyze` 单图视觉解读。
+  - 升级 `backend/app/converter.py`：Docling 2.x 改用 `OcrAutoOptions(mode=OcrMode.FULL_PAGE / DEFAULT)` / `do_ocr=False` 与 `page_range`；Docling 与 MarkItDown（OpenXML `word/media/*`、`ppt/media/*` 及 Data URI）提取插图至 `assets/fig_XX.*`；支持可选 YAML Frontmatter 元数据注入。
+  - 新增 `GET /api/tasks/{id}/assets/{filename}` 静态资源服务与 `POST /api/convert-url` 网页/在线论文抓取转换；`export-zip` 自动打包 `.md` 与 `assets/`；导出独立 `.html` 自动将图片内嵌为 Base64。
+  - 前端 `ConvertHub.tsx` 新增「URL 网页 / 在线论文」标签页与可展开「高级转换参数」面板；`MarkdownPreview.tsx` 自动解析 `assets/` 图片、支持 Lightbox 放大预览、YAML Frontmatter 元数据卡片与单图「AI 视觉解读」一键插入正文；`SettingsModal.tsx` 新增三标签页（服务与外观 / AI 视觉 VLM 含常用端点预设与连通测试 / Obsidian 知识库）。
+- **P2 · Office 原件预览、双栏同步滚动、全文检索与双引擎 A/B 对比**：
+  - 新增 `backend/app/source_preview.py` 与 `GET /api/tasks/{id}/source-preview`，支持 `.xlsx` 多 Sheet 表格与 `.docx`/`.pptx` 富文本结构流；`SourceViewer.tsx` 补齐 Office 原件左侧内联校对。
+  - `MarkdownEditor.tsx` 实现双栏「标题锚点 + 区间比例」双向同步滚动与工具栏开关；新增「双引擎 A/B 对比（MarkItDown vs Docling）」视图与一键择优采用（后端自动保留 `result_markitdown.md` / `result_docling.md` 快照）。
+  - 后端 `GET /api/tasks?q=` 支持同时检索文件名与 `result.md` 正文并返回 `match_snippet`，前端 `LibrarySidebar.tsx` 与 `CommandPalette.tsx` 实时展示正文命中摘要。
+- **P3 · 实时进度流、任务取消、内存缓存与 Vite 拆包优化**：
+  - `TaskManager` 新增内存索引缓存 `self._cache`、SSE 事件总线 `GET /api/tasks/events`、按页实时进度（`progress_pct` / `progress_stage`）与中途取消接口 `POST /api/tasks/{id}/cancel`。
+  - `frontend/vite.config.ts` 配置 `manualChunks` 拆分 `codemirror` / `markdown-katex` / `radix-ui` / `lucide`，并对 `MarkdownEditor` 启用 `React.lazy` 按需懒加载，首屏主包由 **1.81 MB** 降至 **429 KB（gzip 127 KB）**，彻底消除大 Chunk 警告。
+- **P4 · Tauri 2 原生集成与一键导出至 Obsidian / 本地知识库**：
+  - 新增 `POST /api/tasks/{id}/export-to-vault` 与顶栏/导出菜单/命令面板「存入知识库 (Obsidian)」入口，一键写入 `.md`（自动补齐 YAML Frontmatter 并重写图片相对路径）与 `assets/<doc_stem>/` 全部插图。
+  - `ConvertHub.tsx` 支持文件夹递归拖拽导入与「批量导入文件夹」按钮；`App.tsx` 集成后台任务完成桌面通知与 iOS/移动端 `navigator.share`；`frontend/src-tauri/src/lib.rs` 新增 `ensure_local_backend` 命令在本机模式下自动检测并拉起后端服务。
+- **验证状态**：
+  - `backend` `pytest -v`：**12/12 全部通过**（覆盖旧 8 项回归 + 插图提取/静态服务/ZIP打包/YAML Frontmatter/正文全文搜索/DOCX与XLSX原件预览/Obsidian Vault 写入/本地 HTTP URL 抓取/VLM 视觉解读/任务取消）。
+  - `frontend` `npm run build`（`tsc && vite build`）：**零错误、零 Chunk 警告通过**。
+  - `frontend/src-tauri` `cargo check`：**零错误、零警告通过**。
+
+## 2026-11-27 · v3.0 升级方案确认与任务交接（已完成）
+- **用户已确认 v3.0 全部实施范围**：
+  1. **实施顺序**：按 `P1 → P2 → P3 → P4` 全部依次落地（详见 `handoff.md` 第 6 节）。
+  2. **P1 · 引擎与图文闭环 + VLM 视觉模型**：
+     - 提取 PDF / Word / PPT 内嵌图片至 `assets/` 并提供静态资源回传预览与打包导出；
+     - 在设置中增加 **OpenAI 兼容多模态视觉模型（GPT-4o / Qwen-VL / DeepSeek 等）** 接口配置，用于对文档内复杂插图/流程图生成结构化说明；
+     - 新增转换参数面板（PDF 页码范围、OCR 模式、图片开关、YAML Frontmatter 注入）与 **URL 网页/在线文档抓取转换**（`POST /api/convert-url`）。
+  3. **P2 · 校对、同步滚动与全文检索**：
+     - `.docx` / `.xlsx` 原件左侧内联预览（补齐 Office 校对闭环）；
+     - CodeMirror 6 双栏编辑与右侧预览**双向同步滚动**；
+     - 文档库支持 **文件名 + Markdown 正文全文搜索** 与命中摘要展示；
+     - 双引擎（MarkItDown vs Docling）转换结果并排 A/B Diff 对比。
+  4. **P3 · 实时进度、任务取消与性能优化**：
+     - 任务阶段真实进度（`progress_pct` / `progress_stage`）、支持中途取消任务（`POST /api/tasks/{id}/cancel`）、后端内存索引缓存；
+     - 前端 Vite `manualChunks` 拆包与编辑器懒加载（消除 1.81 MB 大 Chunk）。
+  5. **P4 · 桌面原生化与 Obsidian 知识库联动**：
+     - 新增 **「绑定 Obsidian / 本地知识库文件夹，一键将 `.md` 与 `assets/` 图片写入对应目录」** 功能；
+     - 桌面端原生文件夹拖拽导入、本机后端自动检测与通知联动。
+- **当前代码基线**：commit `8e77310`（v2.0 已全部构建并测试通过），新会话可直接从 **P1** 开始编码。
+
 ## 2026-11-26 · v2.0 全面重构：Tailwind + shadcn/ui 苹果原生精修版与多模式工作台
 - **界面技术栈升级**（`frontend/`）：
   - 全面迁移至 **Tailwind CSS v4 + `@tailwindcss/typography` + shadcn/ui (Radix UI 原语) + Zustand + Sonner + cmdk + CodeMirror 6 + rehype-highlight**。

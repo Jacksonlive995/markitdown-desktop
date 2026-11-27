@@ -10,9 +10,10 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { fetchSourceBlobUrl, triggerBlobDownload } from "../api";
-import type { ServerConfig } from "../types";
+import { fetchSourceBlobUrl, fetchSourcePreview, triggerBlobDownload } from "../api";
+import type { ServerConfig, SourcePreviewResponse } from "../types";
 import { Button } from "./ui/button";
+import { cn } from "@/lib/utils";
 
 interface SourceViewerProps {
   config: ServerConfig;
@@ -24,6 +25,8 @@ export function SourceViewer({ config, taskId, filename }: SourceViewerProps) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [rawBlob, setRawBlob] = useState<Blob | null>(null);
   const [textPreview, setTextPreview] = useState<string | null>(null);
+  const [officePreview, setOfficePreview] = useState<SourcePreviewResponse | null>(null);
+  const [activeSheetIdx, setActiveSheetIdx] = useState(0);
   const [contentType, setContentType] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -36,6 +39,7 @@ export function SourceViewer({ config, taskId, filename }: SourceViewerProps) {
     contentType.startsWith("image/") || /\.(png|jpg|jpeg|webp|tif|tiff|bmp)$/.test(lower);
   const isHtml = contentType.includes("html") || /\.(html|htm)$/.test(lower);
   const isCsv = contentType.includes("csv") || lower.endsWith(".csv");
+  const isOfficeRich = /\.(docx|xlsx|xlsm|pptx)$/.test(lower);
   const isTextLike =
     isHtml ||
     isCsv ||
@@ -48,12 +52,19 @@ export function SourceViewer({ config, taskId, filename }: SourceViewerProps) {
     setLoading(true);
     setError(null);
     setTextPreview(null);
+    setOfficePreview(null);
+    setActiveSheetIdx(0);
     setRawBlob(null);
     setImgScale(1);
     setImgRotate(0);
 
-    fetchSourceBlobUrl(config, taskId)
-      .then(async ({ url, contentType: ct, blob }) => {
+    const loadAll = async () => {
+      try {
+        const [{ url, contentType: ct, blob }, officeRes] = await Promise.all([
+          fetchSourceBlobUrl(config, taskId),
+          isOfficeRich ? fetchSourcePreview(config, taskId).catch(() => null) : Promise.resolve(null),
+        ]);
+
         if (!active) {
           URL.revokeObjectURL(url);
           return;
@@ -62,25 +73,29 @@ export function SourceViewer({ config, taskId, filename }: SourceViewerProps) {
         setBlobUrl(url);
         setRawBlob(blob);
         setContentType(ct);
+        if (officeRes && officeRes.kind !== "unsupported") {
+          setOfficePreview(officeRes);
+        }
 
         const textExt = /\.(txt|md|json|xml|csv|html|htm)$/i.test(filename);
         if (ct.startsWith("text/") || ct.includes("json") || ct.includes("xml") || textExt) {
           const text = await blob.text();
           if (active) setTextPreview(text.slice(0, 120_000));
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "原文件加载失败");
-      })
-      .finally(() => {
+      } finally {
         if (active) setLoading(false);
-      });
+      }
+    };
+
+    loadAll();
 
     return () => {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [config, taskId, filename]);
+  }, [config, taskId, filename, isOfficeRich]);
 
   const csvRows = useMemo(() => {
     if (!isCsv || !textPreview) return null;
@@ -90,6 +105,11 @@ export function SourceViewer({ config, taskId, filename }: SourceViewerProps) {
       .slice(0, 80)
       .map((line) => line.split(","));
   }, [isCsv, textPreview]);
+
+  const activeSheet =
+    officePreview?.kind === "xlsx" && officePreview.sheets
+      ? officePreview.sheets[activeSheetIdx] ?? officePreview.sheets[0]
+      : null;
 
   const handleDownloadSource = () => {
     if (rawBlob) {
@@ -194,6 +214,83 @@ export function SourceViewer({ config, taskId, filename }: SourceViewerProps) {
             className="mx-auto block rounded-lg shadow-sm transition-transform duration-150"
           />
         </div>
+      ) : officePreview?.kind === "xlsx" && officePreview.sheets && activeSheet ? (
+        <div className="flex flex-1 flex-col min-h-0 overflow-hidden bg-background">
+          {/* Multi-Sheet Tab Switcher */}
+          <div className="flex items-center justify-between gap-2 border-b border-border bg-muted/35 px-3 py-1.5">
+            <div className="flex items-center gap-1 overflow-x-auto">
+              {officePreview.sheets.map((sheet, idx) => (
+                <button
+                  key={sheet.name}
+                  type="button"
+                  onClick={() => setActiveSheetIdx(idx)}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap transition-colors",
+                    idx === activeSheetIdx
+                      ? "bg-card text-foreground shadow-2xs border border-border"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <FileSpreadsheet className="h-3 w-3 text-success" />
+                  <span>{sheet.name}</span>
+                </button>
+              ))}
+            </div>
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              共 {activeSheet.total_rows} 行{activeSheet.truncated ? "（预览前 200 行）" : ""}
+            </span>
+          </div>
+
+          <div className="flex-1 overflow-auto p-3">
+            {activeSheet.rows.length === 0 ? (
+              <div className="py-12 text-center text-xs text-muted-foreground">当前工作表为空</div>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-border bg-card">
+                <table className="w-full border-collapse text-xs">
+                  <thead className="sticky top-0 z-10 bg-muted/90 backdrop-blur-xs">
+                    <tr>
+                      <th className="w-9 border-b border-r border-border px-2 py-1.5 text-center font-mono text-[10px] text-muted-foreground">
+                        #
+                      </th>
+                      {activeSheet.rows[0].map((cell, cIdx) => (
+                        <th
+                          key={cIdx}
+                          className="border-b border-r border-border px-3 py-2 text-left font-semibold text-foreground whitespace-nowrap"
+                        >
+                          {cell || `Col ${cIdx + 1}`}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activeSheet.rows.slice(1).map((row, rIdx) => (
+                      <tr key={rIdx} className="even:bg-muted/25 hover:bg-primary/[0.04]">
+                        <td className="border-b border-r border-border px-2 py-1.5 text-center font-mono text-[10px] text-muted-foreground">
+                          {rIdx + 2}
+                        </td>
+                        {row.map((cell, cIdx) => (
+                          <td
+                            key={cIdx}
+                            className="border-b border-r border-border px-3 py-1.5 text-foreground"
+                          >
+                            {cell}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (officePreview?.kind === "docx" || officePreview?.kind === "pptx") && officePreview.html ? (
+        <div className="flex-1 overflow-y-auto bg-muted/25 p-5">
+          <div
+            className="mx-auto max-w-2xl rounded-2xl border border-border bg-card p-6 shadow-2xs prose prose-sm dark:prose-invert max-w-none [&_table]:w-full [&_table]:border-collapse [&_th]:border [&_th]:border-border [&_th]:bg-muted/50 [&_th]:px-2.5 [&_th]:py-1.5 [&_td]:border [&_td]:border-border [&_td]:px-2.5 [&_td]:py-1.5 [&_.pptx-slide]:mb-5 [&_.pptx-slide]:rounded-xl [&_.pptx-slide]:border [&_.pptx-slide]:border-border [&_.pptx-slide]:p-4"
+            dangerouslySetInnerHTML={{ __html: officePreview.html }}
+          />
+        </div>
       ) : isCsv && csvRows ? (
         <div className="flex-1 overflow-auto p-4">
           <div className="overflow-x-auto rounded-xl border border-border">
@@ -244,7 +341,7 @@ export function SourceViewer({ config, taskId, filename }: SourceViewerProps) {
           <div className="max-w-xs space-y-1">
             <h4 className="text-sm font-semibold text-foreground">{filename}</h4>
             <p className="text-xs text-muted-foreground leading-relaxed">
-              Office 原生二进制格式（{filename.split(".").pop()?.toUpperCase() || "DOCX/XLSX"}）已由后端提取为右侧结构化 Markdown，你也可以下载原件核对。
+              当前格式（{filename.split(".").pop()?.toUpperCase() || "FILE"}）不支持内联渲染，请直接核对右侧 Markdown 或下载原件查看。
             </p>
           </div>
           {rawBlob && (

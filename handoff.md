@@ -1,81 +1,59 @@
-# Handoff - MarkItDown Desktop
+# Handoff - MarkItDown Desktop (v3.0)
 
 ## 1. 项目定位与技术栈
-- **目标平台**：Windows + macOS 桌面端、iOS（iPhone/iPad）客户端 + 本地/远程双模式后端服务（支持本机 `127.0.0.1:8000` 与远程 CPU VPS 部署）。
-- **客户端**：Tauri 2 + React 19 + TypeScript + Vite + **Tailwind CSS v4 + `@tailwindcss/typography` + shadcn/ui (Radix UI)** + **Zustand** + **CodeMirror 6** + **cmdk** + **Sonner** + `react-markdown` + `remark-gfm` + `remark-math` + `rehype-katex` + `rehype-highlight`。
-- **后端**：Python 3.12 + FastAPI + 线程池异步任务队列 + 磁盘 JSON/MD 持久化（自动保存初始转换快照 `original.md` 供 Diff 对比与一键还原，启动时自动恢复中断任务）。
-- **解析引擎**：
-  - `markitdown`：Word / Excel / PPT / HTML / CSV / JSON / 剪贴板富文本片段等轻量极速转换。
-  - `docling`：PDF / 扫描件 / 复杂表格 / 学术论文转换（纯文本模式：`image_placeholder=""`）。
-  - `auto` 路由规则：PDF 与图片走 `docling`，其余走 `markitdown`。
+- **目标平台**：Windows + macOS 桌面端、iOS（iPhone/iPad）客户端 + 本地/远程双模式后端服务（支持本机 `127.0.0.1:8000` 自动拉起与远程 CPU VPS 部署）。
+- **客户端**：Tauri 2 + React 19 + TypeScript + Vite（`manualChunks` 拆包 + `MarkdownEditor` 懒加载）+ **Tailwind CSS v4 + `@tailwindcss/typography` + shadcn/ui (Radix UI)** + **Zustand** + **CodeMirror 6** + **cmdk** + **Sonner** + `react-markdown` + `remark-gfm` + `remark-math` + `rehype-katex` + `rehype-highlight`。
+- **后端**：Python 3.12 + FastAPI + 线程池异步任务队列 + 内存元数据缓存 + SSE 实时进度推送 + 磁盘 JSON/MD/Assets 持久化（自动保存 `original.md` 与双引擎快照 `result_markitdown.md` / `result_docling.md`，启动自动恢复中断任务）。
+- **解析引擎与 AI 视觉增强**：
+  - `markitdown`：Word / Excel / PPT / HTML / CSV / JSON / URL 网页 / 剪贴板富文本极速转换，并自动提取 OpenXML 内嵌媒体与 Data URI 插图至 `assets/`。
+  - `docling`：PDF / 扫描件 / 复杂表格 / 学术论文深度转换，支持页码范围、OCR 三档策略（`OcrAutoOptions(mode=OcrMode.FULL_PAGE/DEFAULT)` / 关闭 OCR）、按页实时进度回调与插图提取。
+  - **OpenAI 兼容多模态 VLM**：支持在设置或环境变量中接入 GPT-4o / Qwen-VL / Ollama 等 OpenAI 兼容多模态模型，转换时自动解读全部插图，或在阅读器内对单张插图一键「AI 视觉解读」。
 
 ## 2. 目录结构
-- `backend/app/main.py`：FastAPI 路由（健康检查、文件上传转换 `/api/convert`、剪贴板/HTML/文本片段转换 `/api/convert-text`、任务查询、原文件内联预览、在线保存、重试、重命名/星标置顶 `PATCH /api/tasks/{id}`、批量删除 `/api/tasks/batch-delete`、单文件下载、ZIP 批量导出、常量时间 Bearer Token 鉴权）。
-- `backend/app/tasks.py`：异步任务执行、启动中断恢复、`original.md` 原始版本保留、耗时统计与本地磁盘持久化（`backend/data/tasks/<task_id>/`）。
-- `backend/app/converter.py`：双引擎路由与懒加载实例。
-- `backend/tests/test_api.py`：端到端 API 集成测试（8 项全覆盖测试）。
-- `frontend/src/App.tsx`：主工作台（Cupertino 毛玻璃顶栏、`阅读 / 编辑 / 校对` 三模式切换、合并导出菜单、状态栏、iOS 底部四栏导航、自动保存与全局快捷键）。
-- `frontend/src/components/ConvertHub.tsx`：转换中心首页（三引擎卡片、批量拖拽上传、系统剪贴板/HTML富文本转换、一键载入学术论文示例、最近完成卡片网格）。
-- `frontend/src/components/LibrarySidebar.tsx`：文档库侧边栏（按时间/星标分组、搜索、排序、五态筛选、多选批量导出/删除、内联重命名）。
-- `frontend/src/components/MarkdownPreview.tsx`：基于 `rehypeStableHeadingIds` 的稳定锚点渲染、GFM + KaTeX + 代码语法高亮与一键复制代码、可调字体/字号/页宽。
-- `frontend/src/components/MarkdownEditor.tsx`：CodeMirror 6 源码编辑器、格式化工具栏、排版精修下拉、`双栏同步 / 纯源码 / 修订对比 (Diff)` 三种子视图。
-- `frontend/src/components/InspectorPanel.tsx`：右侧检查器（章节目录大纲、文档词数/阅读时长/元素统计与换引擎重转、阅读排版外观与 7 项 Markdown 智能清洗工具）。
-- `frontend/src/components/SourceViewer.tsx`：原文件校对组件（PDF、图片缩放/旋转、CSV 表格/HTML/文本预览及原件下载）。
-- `frontend/src/components/SettingsModal.tsx`：本机服务与远程服务器双模式切换、常用节点保存、带延迟测量的「测试连接」、草稿态保存。
-- `frontend/src/components/CommandPalette.tsx`：`⌘K / Ctrl+K` 全局命令面板。
-- `frontend/src/components/ui/`：shadcn/ui 基础组件库（`button`, `badge`, `dialog`, `dropdown-menu`, `tooltip`, `tabs`）。
-- `frontend/src/stores/ui-store.ts`：Zustand 全局 UI 与持久化配置状态管理（支持本机/远程双模式与常用服务器节点列表）。
-- `frontend/src/utils/markdown.ts`：目录大纲提取、全方位内容统计、7 项 Markdown 智能清洗算法、逐行 Diff 算法与学术论文示例模板。
-- `frontend/src/index.css`：Tailwind CSS v4 + `@tailwindcss/typography` + Apple 原生精修版设计 Token 与深浅色代码高亮主题。
-- `frontend/src-tauri/`：Tauri 2 Rust 壳配置（已配置 `dragDropEnabled: false` 兼容 WebView 文件拖拽）与全平台图标。
+- `backend/app/main.py`：FastAPI v3.0 路由（健康检查、文件上传 `/api/convert`、URL 抓取转换 `/api/convert-url`、文本片段转换 `/api/convert-text`、全文检索 `/api/tasks?q=`、SSE 进度流 `/api/tasks/events`、任务取消 `/api/tasks/{id}/cancel`、静态插图资源 `/api/tasks/{id}/assets/{filename}`、单图 VLM 视觉解读 `/api/tasks/{id}/assets/{filename}/analyze`、VLM 连通测试 `/api/vlm/test`、Office 原件内联预览 `/api/tasks/{id}/source-preview`、Obsidian 知识库一键写入 `/api/tasks/{id}/export-to-vault`、ZIP 打包导出含 `assets/`、常量时间 Bearer Token 鉴权）。
+- `backend/app/tasks.py`：`TaskManager`（内存索引缓存 `self._cache`、SSE 订阅广播、任务取消、实时进度更新、双引擎快照 `result_{engine}.md`、正文全文搜索与摘要提取、含 `assets/` 的 ZIP 打包与 Obsidian Vault 写入）。
+- `backend/app/converter.py`：双引擎路由、Docling 2.x OCR 策略与按页进度回调、OpenXML & Docling 插图提取、`ConversionOptions` 与 YAML Frontmatter 注入。
+- `backend/app/vlm.py`：基于 `httpx` 的 OpenAI 兼容多模态 VLM 客户端、MarkItDown `llm_client` 适配器与插图批量解读。
+- `backend/app/source_preview.py`：`.xlsx`（多 Sheet 表格）、`.docx`（富文本结构 HTML）、`.pptx`（分页幻灯片 HTML）原件内联预览引擎。
+- `backend/tests/test_api.py`：端到端 API 集成测试（12 项全覆盖测试）。
+- `frontend/src/App.tsx`：主工作台（SSE 实时任务进度与桌面通知、按需懒加载 `MarkdownEditor`、全文搜索、单图 VLM 解读、顶栏「存入知识库」一键入库 Obsidian、iOS Share Sheet、Tauri 本机后端自动拉起）。
+- `frontend/src/components/ConvertHub.tsx`：三标签页输入（文件与文件夹递归拖拽/导入、URL 网页/在线论文抓取、剪贴板/HTML 片段）与可展开「高级转换参数」面板。
+- `frontend/src/components/MarkdownPreview.tsx`：YAML Frontmatter 元数据卡片、稳定锚点、自定义 `img`（自动解析 `assets/`、Lightbox 放大查看与单图「AI 视觉解读」）。
+- `frontend/src/components/MarkdownEditor.tsx`：CodeMirror 6 编辑器、双栏「标题锚点 + 比例」双向同步滚动开关、修订对比支持「对比初始版本」与「双引擎 A/B 对比（MarkItDown vs Docling）」。
+- `frontend/src/components/SourceViewer.tsx`：支持 PDF、图片缩放旋转、`.xlsx` 多 Sheet 表格、`.docx`/`.pptx` 富文本流、CSV/HTML/文本原件对照校对。
+- `frontend/src/components/LibrarySidebar.tsx`：全文搜索正文命中摘要、实时进度条与阶段提示、任务一键取消、多选批量导出/删除。
+- `frontend/src/components/SettingsModal.tsx`：三标签页设置弹窗（服务部署与节点 / OpenAI 兼容 VLM 视觉模型与连接测试 / Obsidian 知识库路径与目录预览）。
+- `frontend/src/components/CommandPalette.tsx`：`⌘K / Ctrl+K` 全局命令面板（支持正文全文检索与一键存入知识库）。
+- `frontend/src-tauri/src/lib.rs`：Tauri 2 Rust 壳，新增 `ensure_local_backend` 命令在本地模式下自动检测/拉起本机 uvicorn 服务。
 
-## 3. 后端 API 接口与快捷键速查
-- **API 端点**：
-  - `GET /api/health`：返回服务状态、版本号、双引擎可用性、是否开启鉴权与单文件大小上限（`MAX_UPLOAD_MB`，默认 200MB）。
-  - `POST /api/convert`：流式分块上传并异步转换文件（校验扩展名白名单与大小上限）。
-  - `POST /api/convert-text`：将剪贴板 HTML 富文本、CSV、JSON、XML、TXT 或 Markdown 片段直接创建为转换任务。
-  - `GET /api/tasks` / `GET /api/tasks/{id}`：查询任务列表或详情（含 `markdown` 与初始快照 `original_markdown`）。
-  - `PUT /api/tasks/{id}/markdown`：保存编辑后的 Markdown 并自动标记 `edited` 状态。
-  - `PATCH /api/tasks/{id}`：重命名文档（`filename`）或切换星标置顶（`pinned`）。
-  - `POST /api/tasks/{id}/retry`：使用原引擎或指定引擎（`markitdown` / `docling`）重新解析。
-  - `GET /api/tasks/{id}/source` / `GET /api/tasks/{id}/download`：内联预览原文件或下载结果 `.md`。
-  - `GET /api/tasks/export-zip` / `POST /api/tasks/batch-delete`：批量打包导出 ZIP 或批量删除。
-- **桌面端快捷键**：
-  - `Ctrl+K` / `⌘K`：打开全局命令面板
-  - `Ctrl+S` / `⌘S`：立即保存当前 Markdown 修改
-  - `Ctrl+B` / `⌘B`：折叠/展开左侧文档库侧边栏
-  - `Ctrl+1` / `Ctrl+2` / `Ctrl+3`（macOS 为 `⌘1/2/3`）：在 **阅读 / 编辑 / 校对** 三种工作模式间快速切换
+## 3. 后端 API 速查（v3.0）
+- `GET /api/health`：版本、双引擎状态、VLM 环境变量状态与特性清单。
+- `POST /api/convert`：上传文件并支持 `page_range` / `ocr_mode` / `extract_images` / `use_vlm` / `frontmatter` / `vlm_config`。
+- `POST /api/convert-url`：拉取远程网页或在线 PDF/Markdown 并转换。
+- `POST /api/convert-text`：将剪贴板 HTML / CSV / JSON / TXT / MD 片段转为任务。
+- `GET /api/tasks?q=关键词`：列表与「文件名 + Markdown 正文」全文搜索（返回 `match_snippet`）。
+- `GET /api/tasks/events`：SSE 实时任务进度与状态事件流（支持 `Authorization` 或 `?token=`）。
+- `POST /api/tasks/{id}/cancel` / `POST /api/tasks/{id}/retry`：取消或重试（可切换引擎与参数）。
+- `GET /api/tasks/{id}/assets/{filename}` & `POST /api/tasks/{id}/assets/{filename}/analyze`：读取提取的插图及单图 VLM 视觉解读。
+- `POST /api/vlm/test`：测试 OpenAI 兼容 VLM 端点连通性。
+- `GET /api/tasks/{id}/source` & `GET /api/tasks/{id}/source-preview`：原件下载与 Office（`.xlsx`/`.docx`/`.pptx`）内联结构预览。
+- `POST /api/tasks/{id}/export-to-vault`：一键将 `.md`（含 YAML Frontmatter 与重写后的图片路径）与 `assets/` 写入本地 Obsidian / 知识库目录。
+- `GET /api/tasks/export-zip`：打包 `.md` 与 `assets/` 为 ZIP。
 
-## 4. 本机环境与运行方式
-- **Python 虚拟环境**：`backend/.venv`（已安装 `fastapi`、`markitdown[all]`、`docling`、`pytest` 等）。
-- **Node.js**：已安装 `frontend/node_modules`（`npmmirror`）。
-- **Rust / MSVC**：已安装 `rustc 1.100.0`、`cargo 1.100.0` 及 `Visual Studio 2022 BuildTools`。
-
-启动本地开发：
+## 4. 本机运行与验证命令
 ```powershell
-# 终端 1：启动后端
-cd F:\Development\Gemini-Development\markitdown-desktop\backend
-.\.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000
-
-# 终端 2：启动 Tauri 桌面端
-cd F:\Development\Gemini-Development\markitdown-desktop\frontend
-npm run tauri dev
-```
-
-运行测试与检查：
-```powershell
-# 后端集成测试
+# 后端集成测试（12 项）
 cd F:\Development\Gemini-Development\markitdown-desktop\backend
 .\.venv\Scripts\python.exe -m pytest -v
 
-# 前端类型与构建检查
+# 启动后端
+.\.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000
+
+# 前端类型检查与 Vite 拆包构建
 cd F:\Development\Gemini-Development\markitdown-desktop\frontend
 npm run build
-```
 
-## 5. 已知注意项与待办
-- **VPS 部署**：普通 CPU VPS 运行 `docling` 建议至少 4GB 内存（或设 `MAX_WORKERS=1`）；公网部署务必设置 `API_TOKEN`（支持环境变量 `API_TOKEN`、`DATA_DIR`、`MAX_WORKERS`、`MAX_UPLOAD_MB`、`CORS_ORIGINS`）。
-- **打包发布**：
-  - Windows 安装包：在 `frontend/` 执行 `npm run tauri build`。
-  - macOS / iOS：需在 macOS + Xcode 环境执行 `npm run tauri build` 与 `npm run tauri ios init / build`。
-- **后续可迭代方向**：PDF 提取图片静态资源回传预览、MinerU API 作为第三可选高精度引擎、Tauri Sidecar 内置本地 Python 引擎打包、批量拖拽文件夹。
+# Tauri Rust 检查与开发运行
+cd F:\Development\Gemini-Development\markitdown-desktop\frontend\src-tauri
+cargo check
+```
