@@ -1,5 +1,22 @@
 # Progress Log - MarkItDown Desktop
 
+## 2026-11-27 · 停止后端、更新交接和验证
+- 按用户要求停止本地 Uvicorn 后端（PID 9568）；确认 `127.0.0.1:8000/api/health` 不再响应。
+- 更新 `handoff.md`，补入 Windows MSI 构建命令、图标资源状态、后端未随 MSI 打包的限制、本地服务状态与旧 `.doc` 格式说明。
+- 图标配置已存在于 `frontend/src-tauri/tauri.conf.json`；所引用的 5 个图标文件均存在。
+- 验证：后端 pytest 12/12 通过（2 条第三方弃用警告）；前端 `npm run build` 通过；Tauri `cargo check` 通过；`npm run tauri -- build --bundles msi` 成功，x64 MSI 为 4.11 MiB。
+- MSI 路径：`frontend/src-tauri/target/release/bundle/msi/MarkItDown Desktop_3.0.0_x64_en-US.msi`。该安装包当前未包含 Python 后端环境或 Docling 模型缓存。
+
+## 2026-11-27 · 本机转换任务失败排查
+- 查到最新失败任务：`天河理想城电梯维修费用支付说明.doc`，任务状态 `failed`、请求引擎 `markitdown`；任务异常为 MarkItDown 没有可用转换器处理此文件类型。
+- 根因：这是旧版 `.doc` 格式；当前自动路由仅将 PDF 和图片优先交给 Docling，其余格式交给 MarkItDown，且 MarkItDown 不支持该 `.doc` 文件类型。保存为 `.docx` 后再转换可走现有 Office 路径。
+- 日志现状：任务错误文本保存在任务元数据中；Tauri 启动后端时将 stdout/stderr 丢弃，因此没有单独的服务控制台堆栈日志。未修改代码。
+
+## 2026-11-27 · 桌面端「新建转换」点击行为排查
+- 根据用户截图及代码核对：侧栏按钮绑定 `App.tsx` 的 `handleOpenConvertHub`，仅清空文档选择并切换至转换工作台；已在工作台时再次点击没有可见变化。
+- 选择文件入口位于 `ConvertHub.tsx` 的上传区域及「选择文件」按钮，点击后调用文件输入框；此次未修改交互行为，也未在桌面端执行点击验证。
+- 当前状态：原因已定位；如需让「新建转换」直接打开文件选择框，属于后续交互调整。
+
 ## 2026-11-27 · v3.0 全面升级落地（P1 → P4 全部完成并通过验证）
 - **P1 · 解析引擎增强、图文资源闭环与多模态 VLM 集成**：
   - 新增 `backend/app/vlm.py`，基于 `httpx` 实现零额外依赖的 OpenAI 兼容多模态 VLM 客户端与 `MarkItDown(llm_client=...)` 适配器；支持 `POST /api/vlm/test` 测试连通性与 `POST /api/tasks/{id}/assets/{filename}/analyze` 单图视觉解读。

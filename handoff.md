@@ -56,4 +56,15 @@ npm run build
 # Tauri Rust 检查与开发运行
 cd F:\Development\Gemini-Development\markitdown-desktop\frontend\src-tauri
 cargo check
+
+# Windows MSI 安装包
+cd F:\Development\Gemini-Development\markitdown-desktop\frontend
+npm run tauri -- build --bundles msi
 ```
+
+## 5. 当前交接状态（2026-11-27）
+- **Windows 图标**：`frontend/src-tauri/tauri.conf.json` 已配置 PNG、ICO 与 ICNS 图标，引用的文件均位于 `frontend/src-tauri/icons/`。
+- **MSI 与后端**：MSI 构建打包 Tauri 桌面端；当前没有把 Python 后端、`.venv` 或 Docling 模型缓存作为安装包资源。Tauri 本机启动逻辑会在应用附近查找 `backend/.venv`，因此独立安装包仍需另行提供后端运行环境。
+- **最近一次 Windows 构建**：`npm run tauri -- build --bundles msi` 成功，x64 安装包位于 `frontend/src-tauri/target/release/bundle/msi/MarkItDown Desktop_3.0.0_x64_en-US.msi`（4.11 MiB）。
+- **本机服务状态**：当前本机后端已按用户要求停止；再次运行可使用第 4 节的 Uvicorn 启动命令。
+- **已知格式限制**：旧版 Word `.doc` 会在 MarkItDown 转换时因格式不受支持而失败；保存为 `.docx` 后再转换。
